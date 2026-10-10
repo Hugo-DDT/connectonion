@@ -36,7 +36,7 @@ python -m pip install --upgrade 'connectonion==1.9.2b4'
 
 ## Previous previews
 
-Beta **1.9.2b3** was merged but not published on its own; its changes (sources
+Beta **1.9.2b3** was built and tested but not published on its own; its changes (sources
 numbered 1, 2, 3, Company from the organisation page, probable duplicates named,
 fewer pages refused, and the unpublished 1.9.2b2) are in 1.9.2b4. See
 [1.9.2b3 notes](releases/1.9.2b3.md).

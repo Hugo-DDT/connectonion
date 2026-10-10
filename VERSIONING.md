@@ -402,7 +402,7 @@ See [1.8.4a2 notes](docs/releases/1.8.4a2.md) and the
 
 ## Current Version: 1.9.2b4
 
-1.9.2b4 is a 1.9.2 beta; stable remains 1.9.1. It includes 1.9.2b3, merged
+1.9.2b4 is a 1.9.2 beta; stable remains 1.9.1. It includes 1.9.2b3, built
 but not published on its own. A follow-up mail search the
 model asks for is sent without its phrase quotes (Outlook refused every quoted
 one with HTTP 400) and answered only by people the notebook knows; after the final
@@ -412,7 +412,7 @@ outside Uncertainties and gives the model one editing round that names them;
 size. See [1.9.2b4 notes](docs/releases/1.9.2b4.md).
 
 - 1.9.2b4 (A follow-up search that runs, and an editing round for what the final round left).
-- 1.9.2b3 (A first run you can read straight away; merged, not published).
+- 1.9.2b3 (A first run you can read straight away; built, not published).
 - 1.9.2b2 (A first run that loses fewer pages; built, not published).
 - 1.9.2b1 (Each pass improves the page, not only grows it).
 

@@ -404,7 +404,7 @@ See [1.8.4a2 notes](docs/releases/1.8.4a2.md) and the
 
 1.9.2b4 is a 1.9.2 beta; stable remains 1.9.1. A follow-up mail search the
 model asks for is sent without its phrase quotes (Outlook refused every quoted
-one with HTTP 400) and answers without digests and newsletters; after the final
+one with HTTP 400) and answered only by people the notebook knows; after the final
 investigation round, code counts the lines that still say what is not known
 outside Uncertainties and gives the model one editing round that names them;
 `co rem logs --usage` no longer crashes on a skill run's bare instruction

@@ -25,16 +25,21 @@ python -m pip install --upgrade 'connectonion==1.9.1'
 
 ## Current preview
 
+Beta **1.9.2b4** makes a person's investigation go deeper on the second pass:
+the follow-up mail searches it asks for now run (quotes stripped, digests
+left out), and the hedges the final round leaves outside Uncertainties get one
+editing round that names them. See [1.9.2b4 notes](releases/1.9.2b4.md).
+
+```bash
+python -m pip install --upgrade 'connectonion==1.9.2b4'
+```
+
+## Previous previews
+
 Beta **1.9.2b3** gives a first run you can read straight away: sources numbered
 1, 2, 3, Company filled from the organisation page, probable duplicates named,
 and fewer pages refused. It includes the unpublished 1.9.2b2. See
 [1.9.2b3 notes](releases/1.9.2b3.md).
-
-```bash
-python -m pip install --upgrade 'connectonion==1.9.2b3'
-```
-
-## Previous previews
 
 Beta **1.9.2b2** was built and tested but not published; its changes are in
 1.9.2b3. See [1.9.2b2 notes](releases/1.9.2b2.md).

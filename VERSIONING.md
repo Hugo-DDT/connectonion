@@ -402,8 +402,7 @@ See [1.8.4a2 notes](docs/releases/1.8.4a2.md) and the
 
 ## Current Version: 1.9.2b4
 
-1.9.2b4 is a 1.9.2 beta; stable remains 1.9.1. It includes 1.9.2b3, built
-but not published on its own. A follow-up mail search the
+1.9.2b4 is a 1.9.2 beta; stable remains 1.9.1. A follow-up mail search the
 model asks for is sent without its phrase quotes (Outlook refused every quoted
 one with HTTP 400) and answered only by people the notebook knows; after the final
 investigation round, code counts the lines that still say what is not known
@@ -413,9 +412,20 @@ size; the launchd job runs under `caffeinate -i` so a slot on a laptop is not
 run in 45-second dark wakes. See [1.9.2b4 notes](docs/releases/1.9.2b4.md).
 
 - 1.9.2b4 (A follow-up search that runs, and an editing round for what the final round left).
-- 1.9.2b3 (A first run you can read straight away; built, not published).
+- 1.9.2b3 (A first run you can read straight away).
 - 1.9.2b2 (A first run that loses fewer pages; built, not published).
 - 1.9.2b1 (Each pass improves the page, not only grows it).
+
+## Previous preview: 1.9.2b3
+
+1.9.2b3 is a 1.9.2 beta; stable remains 1.9.1. It includes the unpublished
+1.9.2b2. A first run you can read straight away: sources are numbered 1, 2, 3,
+a person's Company links the organisation page for their mail domain, probable
+duplicate people are named with the merge command, `co rem show` finds a
+person by name, alias or email, pages speak in one voice,
+and a missing required section is added as Unknown instead of the page being
+refused. The reader keeps Facts labels and addresses on whole words and
+shortens 64-character ids. See [1.9.2b3 notes](docs/releases/1.9.2b3.md).
 
 ## Stable release: 1.9.1
 

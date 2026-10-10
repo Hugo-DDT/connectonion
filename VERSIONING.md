@@ -409,7 +409,8 @@ one with HTTP 400) and answered only by people the notebook knows; after the fin
 investigation round, code counts the lines that still say what is not known
 outside Uncertainties and gives the model one editing round that names them;
 `co rem logs --usage` no longer crashes on a skill run's bare instruction
-size. See [1.9.2b4 notes](docs/releases/1.9.2b4.md).
+size; the launchd job runs under `caffeinate -i` so a slot on a laptop is not
+run in 45-second dark wakes. See [1.9.2b4 notes](docs/releases/1.9.2b4.md).
 
 - 1.9.2b4 (A follow-up search that runs, and an editing round for what the final round left).
 - 1.9.2b3 (A first run you can read straight away; built, not published).

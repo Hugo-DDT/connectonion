@@ -1266,3 +1266,23 @@ def test_tokens_per_1k_characters_is_measured_on_sync_batches_only(tmp_path):
                                      "phase": "investigate", "outcome": "completed",
                                      "usage": {"input_tokens": 900_000}, "chars_in": 30})
     assert usage_report(tmp_path)["by_model"]["m"]["input_tokens_per_1k_chars"] == 500.0
+
+
+def test_usage_report_survives_a_run_whose_instruction_size_is_one_number(tmp_path):
+    """`co rem logs --usage` crashed on a real 1.9.2b1 notebook: 156 skill
+    investigations recorded `instructions_chars` as the number the runner
+    returned, not a {stage: number} table (2026-10-10)."""
+    from connectonion.rem.service import usage_report
+    prepare(tmp_path)
+    runs = state_path(tmp_path, "runs")
+    runs.mkdir(parents=True, exist_ok=True)
+    base = {"outcome": "completed", "model": "m", "usage": {"input_tokens": 10}}
+    write_json(runs / "run_a.json", {**base, "id": "run_a", "started_at": "2026-10-10T01:00:00+00:00",
+                                     "phase": "investigate", "record": "skills/catalog/x.md",
+                                     "instructions_chars": 12_000})
+    write_json(runs / "run_b.json", {**base, "id": "run_b", "started_at": "2026-10-10T02:00:00+00:00",
+                                     "instructions_chars": {"investigate": 14_000}})
+
+    stages = usage_report(tmp_path)["by_stage"]
+
+    assert stages["investigate"]["instructions_chars_mean"] == 13_000

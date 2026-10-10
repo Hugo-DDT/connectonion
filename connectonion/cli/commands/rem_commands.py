@@ -247,7 +247,7 @@ def _logged(root, record, phase, call, quiet=False):
                    chars_in=result.get("chars_gathered") or 0, coverage=result.get("coverage") or [],
                    instructions_chars=_by_stage(result.get("instructions_chars"), phase),
                    evidence=result.get("evidence") or [], report=result.get("report") or "",
-                   **({"hedged_lines": result["hedged_lines"]} if result.get("hedged_lines") else {}))
+                   **{key: result[key] for key in ("hedged_lines", "rounds", "refused_rounds") if result.get(key)})
         _WRITTEN.append(record)
         # Said, not left to the record: an accepted page had no outcome line (#2044).
         if not quiet:

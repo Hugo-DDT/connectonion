@@ -6032,6 +6032,7 @@ function sweepRawMarks(root) {
 function applyPrivacy(root) {
   if (!(root instanceof Element)) return;
   sweepRawMarks(root);
+  maskPrivateTopicText(root);
   if (privacyLevel === "all") return;
   const within = selector => [...(root.matches(selector) ? [root] : []), ...root.querySelectorAll(selector)];
   if (privacyLevel === "cover") {
@@ -6259,8 +6260,87 @@ function codedOrgName(r) {
   const word = orgT(kind);
   return t("{kind} {code}", { kind: uiLanguage === "en" ? word[0].toUpperCase() + word.slice(1) : word, code: title });
 }
-// Any page's name in a link: its title, or what a coded course or team is.
-function pageName(r) { return codedOrgName(r) || r?.title; }
+// A knowledge page whose title is marked [personal]/[sensitive] is private as a whole. The graph already
+// paints it 「个人事项 N」 below Show all (#3385). A link that prints the real title walks around that
+// curtain: Insight, 相关知识, a backlink, search, a breadcrumb (#3387). The number is the graph's own.
+function knowledgeTitlePrivate(r) {
+  return !!r && r.category === "knowledge" && hasPrivacy(String(r.text || "").split("\n")[0]);
+}
+let topicMaskCache = null, topicPhraseCache = null;
+function topicMaskNumbers() {
+  if (topicMaskCache) return topicMaskCache;
+  const records = new Map((REM.records || []).map(r => [r.path, r]));
+  const nodes = (REM.graph?.nodes || []).map(n => ({ id: n.id, private: !!n.private, r: records.get(n.id) }));
+  assignMaskNumbers(nodes);
+  return topicMaskCache = new Map(nodes.filter(n => n.private).map(n => [n.id, n.maskNo || 0]));
+}
+function maskedTopicLabel(r) {
+  if (privacyLevel === "all" || !knowledgeTitlePrivate(r)) return "";
+  const n = topicMaskNumbers().get(r.path) || +(/^Masked:[ \t]*(\d+)[ \t]*$/m.exec(r.text || "")?.[1] || 0);
+  return graphT("Personal") + (n ? " " + n : "");
+}
+function privateTopicPhrases() {
+  if (topicPhraseCache) return topicPhraseCache;
+  const rows = [], seen = new Set();
+  for (const r of REM.records || []) {
+    if (!knowledgeTitlePrivate(r)) continue;
+    const label = maskedTopicLabel(r);
+    const heading = String(r.text || "").split("\n")[0].replace(/^#\s*/, "").replace(/\s*[\[［](?:personal|sensitive)[\]］]/gi, "").trim();
+    for (const name of [r.title, r.title_original, heading]) {
+      const bare = String(name || "").trim();
+      if (bare.length < 3 || bare === label || seen.has(bare)) continue;
+      seen.add(bare);
+      rows.push({ name: bare, label });
+    }
+  }
+  rows.sort((a, b) => b.name.length - a.name.length);
+  return topicPhraseCache = rows;
+}
+function replacePhrase(value, name, label) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return value.replace(new RegExp("(?<![\\p{L}\\p{N}])" + escaped + "(?![\\p{L}\\p{N}])", "gu"), label);
+}
+function maskPrivateTopicString(text) {
+  if (privacyLevel === "all" || text == null) return text;
+  let value = String(text);
+  for (const { name, label } of privateTopicPhrases()) if (value.includes(name)) value = replacePhrase(value, name, label);
+  return value;
+}
+// Title and aria-label too: a hover tip was a second copy of the private name.
+function maskPrivateTopicText(root) {
+  if (privacyLevel === "all" || !(root instanceof Element)) return;
+  const rows = privateTopicPhrases();
+  if (!rows.length) return;
+  const apply = value => {
+    let out = value;
+    for (const { name, label } of rows) if (out.includes(name)) out = replacePhrase(out, name, label);
+    return out;
+  };
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.parentElement?.closest("textarea, input, script, style")) continue;
+    nodes.push(node);
+  }
+  for (const node of nodes) {
+    const next = apply(node.nodeValue);
+    if (next !== node.nodeValue) node.nodeValue = next;
+  }
+  for (const el of [...(root.matches("[title], [aria-label]") ? [root] : []), ...root.querySelectorAll("[title], [aria-label]")]) {
+    for (const attr of ["title", "aria-label"]) {
+      const value = el.getAttribute(attr);
+      if (!value) continue;
+      const next = apply(value);
+      if (next !== value) el.setAttribute(attr, next);
+    }
+  }
+}
+function recordFromHref(href) {
+  const found = /[#&]r=([^&#]+)/.exec(String(href || ""));
+  if (!found) return null;
+  try { return byPath(decodeURIComponent(found[1])); } catch { return null; }
+}
+// Any page's name in a link: its title, what a coded course or team is, or the masked label of a private topic.
+function pageName(r) { return maskedTopicLabel(r) || codedOrgName(r) || r?.title; }
 function chipName(slug) {
   const label = tagLabel(slug).trim();
   if (!chipCoded(label)) return { name: label, readable: true };
@@ -6600,7 +6680,8 @@ function inline(text, from) {
     // A page that is not in the notebook: say so, rather than look like a link that does nothing (#2054).
     if (!link) return /\.md(#.*)?$/i.test(url) ? '<span class="dead-link" title=t("This page is no longer in the notebook")>' + lbl + "</span>" : lbl;
     const attrs = link.external ? ' target="_blank" rel="noopener noreferrer"' : "";
-    links.push('<a href="' + esc(link.href) + '"' + attrs + ">" + lbl + "</a>");
+    const masked = link.external ? "" : maskedTopicLabel(recordFromHref(link.href));
+    links.push('<a href="' + esc(link.href) + '"' + attrs + ">" + (masked ? esc(masked) : lbl) + "</a>");
     return "\u0002" + (links.length - 1) + "\u0002";
   });
   // A page named in the notebook's own file syntax reads as its name, linked when the page exists (#3318).
@@ -6987,7 +7068,7 @@ function pageWords(text, link) {
   // A link that names a coded course or team by its bare code says what it is (codedOrgName).
   const coded = (path, label) => { const r = record(path), name = typeof codedOrgName === "function" ? codedOrgName(r) : null;
     return name && (!label || label.trim() === r.title.trim()) ? name : null; };
-  const name = (path, label) => coded(path, label) || (label && label.trim()) || record(path)?.title || words(path) || pathOf(path);
+  const name = (path, label) => maskedTopicLabel(record(path)) || coded(path, label) || (label && label.trim()) || record(path)?.title || words(path) || pathOf(path);
   const out = (path, label) => link ? link(record(path), name(path, label)) : name(path, label);
   return String(text ?? "")
     .replace(/\[\[\s*([^\]|#]+?)\s*(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g, (m, path, label) => out(path, label))
@@ -17233,7 +17314,8 @@ function record(path, heading) {
       if (links.length) {
         for (const [, lbl, url] of links) {
           const link = safeHref(r.path, url);
-          box.appendChild(link ? el("a", { href: link.href, text: lbl }) : el("span", { text: lbl }));
+          const masked = link && maskedTopicLabel(recordFromHref(link.href));
+          box.appendChild(link ? el("a", { href: link.href, text: masked || lbl }) : el("span", { text: maskPrivateTopicString(lbl) }));
         }
       } else box.innerHTML = inline(parts.related, r.path);
       aside.appendChild(box);
@@ -17642,7 +17724,7 @@ function search(q, relatedPath = "") {
     const ul = el("ul", { class: "hits" });
     for (const [i, { r, lines }] of list.entries()) {
       const li = el("li", {}, [
-        el("div", { class: "t" }, [el("span", {}, [el("a", { href: href(r) + (c === "sessions" ? "&find=" + encodeURIComponent(q) : ""), html: highlight(r.title, needle) }), statusPill(r)]),
+        el("div", { class: "t" }, [el("span", {}, [el("a", { href: href(r) + (c === "sessions" ? "&find=" + encodeURIComponent(q) : ""), html: highlight(maskedTopicLabel(r) || r.title, needle) }), statusPill(r)]),
           el("span", { class: "when", text: shortDate(known(r).last) })])]);
       // The snippet adds what the title does not say: a line that only repeats the title is skipped.
       const line = lines.map(l => l.trim().replace(/^#+\s*/, "").replace(/^[-+]\s+/, ""))
@@ -17691,7 +17773,7 @@ function bestMatch(r) {
       : [["Repository", plainValue(first("Repository"))], ["Status", plainValue(first("Status"))], ["Last activity", k.last ? fmtDate(k.last) : ""]];
   const open = f.open[0];
   return el("section", { class: "best" }, [
-    el("div", { class: "best-head" }, [el("span", { class: "lead", text: t("Best match") }), el("a", { href: href(r), text: r.title }), statusPill(r)]),
+    el("div", { class: "best-head" }, [el("span", { class: "lead", text: t("Best match") }), el("a", { href: href(r), text: maskedTopicLabel(r) || r.title }), statusPill(r)]),
     el("dl", { class: "best-facts" }, cells.filter(([, v]) => knownValue(v)).flatMap(([name, v]) => [el("dt", { text: t(name) }), el("dd", { class: v ? "" : "none", text: v ? displayLine(v) : t("— not found") })])),
     open ? el("div", { class: "best-open" }, [el("span", { class: "dir", text: t(DIRECTION_LABEL[open.dir]) }), el("span", { text: displayLine(open.text) })]) : null]);
 }
@@ -17876,6 +17958,12 @@ function graphSlash(x, y, r) { return `M${x - r * 1.1} ${y + r * 1.1}L${x + r * 
 
 // ---------- the model: nodes, edges, adjacency and one settled layout ----------
 let GRAPH = null;
+function assignMaskNumbers(nodes) {
+  const masked = nodes.filter(n => n.private);
+  const stored = n => +(/^Masked:[ \t]*(\d+)[ \t]*$/m.exec(n.r?.text || "")?.[1] || 0);
+  let next = Math.max(0, ...masked.map(stored));
+  for (const n of masked.slice().sort((a, b) => (a.id < b.id ? -1 : 1))) n.maskNo = stored(n) || ++next;
+}
 function graphModel() {
   if (GRAPH && GRAPH.source === REM.graph) return GRAPH;
   const source = REM.graph || { nodes: [], edges: [] };
@@ -17886,10 +17974,8 @@ function graphModel() {
   const byId = new Map(nodes.map(n => [n.id, n]));
   // Two masked pages never read as one (#3385: four rows said "Personal"). Each page carries its number, given once
   // in the order pages were first masked (masked.py, "Masked: N"); the reader only reads it. A legacy page with none
-  // yet follows the highest stored number, by path, without writing anything.
-  const masked = nodes.filter(n => n.private), stored = n => +(/^Masked:[ \t]*(\d+)[ \t]*$/m.exec(n.r?.text || "")?.[1] || 0);
-  let next = Math.max(0, ...masked.map(stored));
-  for (const n of masked.sort((a, b) => (a.id < b.id ? -1 : 1))) n.maskNo = stored(n) || ++next;
+  // yet follows the highest stored number, by path, without writing anything. Links use the same numbers (#3387).
+  assignMaskNumbers(nodes);
   const edges = source.edges.concat(source.tags?.edges || []).filter(e => byId.has(e.source) && byId.has(e.target)).map(e => ({ s: e.source, t: e.target, k: e.kind }));
   const adj = new Map();
   for (const e of edges) for (const [a, b] of [[e.s, e.t], [e.t, e.s]]) (adj.get(a) || adj.set(a, new Set()).get(a)).add(b);
@@ -18995,7 +19081,7 @@ function topicList() {
 function topicEntry({ r, linked, last }) {
   const shown = linked.slice(0, 4);
   return el("li", {}, [el("a", { class: "gx-entry", href: href(r) }, [graphGlyph("knowledge", 16, r.private),
-      el("span", { class: "gx-row-body" }, [el("b", { text: topicName(r.title) }), el("small", { text: topicAliases(r).slice(1, 5).join(" · ") })])]),
+      el("span", { class: "gx-row-body" }, [el("b", { text: maskedTopicLabel(r) || topicName(r.title) }), el("small", { text: topicAliases(r).slice(1, 5).join(" · ") })])]),
     el("span", { class: "gx-entry-links" }, [...shown.map(n => el("a", { href: href(n.r), title: graphT(GRAPH_ONE[n.k]) }, [graphGlyph(n.k, 12, n.private), graphShort(graphTitle(n), 18)])),
       linked.length > shown.length ? el("span", { class: "gx-row-meta", text: "+" + (linked.length - shown.length) }) : null]),
     last ? el("time", { class: "gx-row-meta", datetime: last, text: fmtDate(last) }) : null]);
@@ -19074,7 +19160,7 @@ function topicRelated(r) {
   const others = topicRecords().filter(other => other.path !== r.path).map(other => ({ other, shared: topicLinked(other).filter(n => mine.has(n.id)).length }))
     .filter(({ shared }) => shared).sort((a, b) => b.shared - a.shared).slice(0, 3);
   return others.length ? [el("h4", { text: graphT("Related knowledge") }), el("ul", { class: "gx-rail-list" }, others.map(({ other, shared }) =>
-    el("li", {}, [el("a", { href: href(other) }, [graphGlyph("knowledge", 12, other.private), topicName(other.title)]), el("small", { text: graphT("{n} shared records", { n: shared }) })])))] : [];
+    el("li", {}, [el("a", { href: href(other) }, [graphGlyph("knowledge", 12, other.private), maskedTopicLabel(other) || topicName(other.title)]), el("small", { text: graphT("{n} shared records", { n: shared }) })])))] : [];
 }
 function topicUnsure(r) {
   const items = listItems(section(r, "uncertainties")?.text || "").map(line => plainLine(line)).filter(line => line && !/^Unknown\b/.test(line)).slice(0, 2);
@@ -19247,7 +19333,7 @@ function entryCounts(r) {
   return el("p", { class: "entry-counts", text: capFirst(parts.join(" · ")) });
 }
 function entryHead(r, model, written) {
-  const topic = r.category === "knowledge", title = topic ? topicName(r.title) : r.title, same = text => text.toLowerCase().replace(/\s+/g, "");
+  const topic = r.category === "knowledge", title = maskedTopicLabel(r) || (topic ? topicName(r.title) : r.title), same = text => text.toLowerCase().replace(/\s+/g, "");
   const aka = [...new Map([...model.aka, ...(r.topic?.aliases || [])].map(name => [same(name), name])).values()].filter(name => same(name) !== same(title) && same(name) !== same(r.title));
   const first = topic ? topicRows(r).map(row => row.date).filter(Boolean).sort()[0] : "";
   const unwritten = written ? "" : first ? graphT("REM has not written this page yet · named in {n} records since {date}", { n: topicRows(r).length, date: fmtDate(first) }) : graphT("REM has not written this page yet");
@@ -19377,6 +19463,7 @@ function localiseTitles() {
 }
 function render() {
   if (!REM) return;
+  topicMaskCache = topicPhraseCache = null;
   localiseTitles();
   renderLangProgress();
   threadEntries.cached = null;
@@ -19429,8 +19516,9 @@ function render() {
   else overview();
   quietLaterPrimaries(document.getElementById("main"));
   tidyText(document.getElementById("main"));
-  document.title = (reviews ? t("Questions & connections") : r ? (privateTopicHidden(byPath(r) || {}) ? t("Hidden labelled passage") : byPath(r)?.title || t("Missing page")) : query ? t("Search: ") + query :
-    view === "open" ? t("Open threads") : view === "changes" ? t("Memory changes") : view === "activity" ? t("Activity") : view === "graph" || c === "all" ? label("knowledge") : c ? label(c) : t("Today")) + " · co rem";
+  document.title = maskPrivateTopicString((reviews ? t("Questions & connections") : r ? (privateTopicHidden(byPath(r) || {}) ? t("Hidden labelled passage") : byPath(r)?.title || t("Missing page")) : query ? t("Search: ") + query :
+    view === "open" ? t("Open threads") : view === "changes" ? t("Memory changes") : view === "activity" ? t("Activity") : view === "graph" || c === "all" ? label("knowledge") : c ? label(c) : t("Today")) + " · co rem");
+  maskPrivateTopicText(document.body);
   for (const link of document.querySelectorAll("#nav a.active")) link.setAttribute("aria-current", "page");
   const viewKey = r || c || view || (reviews ? "reviews" : query ? "search" : "today");
   if (viewKey !== entranceView) document.querySelectorAll("#main .fresh-label, #main .updated-label, #main .changed-value").forEach(node => node.classList.add("memory-enter"));

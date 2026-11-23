@@ -46,7 +46,9 @@ def test_a_marked_wechat_contact_is_never_stubbed_by_the_map(tmp_path):
 
 
 def test_the_night_does_not_bring_a_marked_contact_back(tmp_path, monkeypatch):
+    from connectonion.rem.files import state_path, write_json
     book = Notebook(tmp_path)
+    write_json(state_path(tmp_path, "subscriptions.json"), SUBS)
     monkeypatch.setattr("connectonion.rem.chat.wechat_people", lambda *a, **k: [{**r, "kind": "wechat"} for r in CONTACTS])
     created = onboard.run_due(tmp_path, SUBS, night=True)
     shop = next(path for path in created if "wxid_kilnshop" in book.read(path))

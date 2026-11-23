@@ -40,17 +40,19 @@ def test_wechat_is_on_by_default_once_keys_are_captured(tmp_path, monkeypatch):
     from connectonion.rem import service
     from connectonion.rem.config import prepare
     import connectonion.rem.service as svc
-    prepare(tmp_path / "rem")
-    # No keys yet: offered, off.
-    monkeypatch.setattr(svc.Path, "home", staticmethod(lambda: tmp_path / "nokeys"))
-    off = service.subscriptions(tmp_path / "rem")["wechat"]
+    # No keys yet: offered, off. This is the owner's notebook, ~/.co/rem.
+    bare = tmp_path / "nokeys"
+    prepare(bare / ".co" / "rem")
+    monkeypatch.setattr(svc.Path, "home", staticmethod(lambda: bare))
+    off = service.subscriptions(bare / ".co" / "rem")["wechat"]
     assert off["enabled"] is False and off["adapter"] == "waiting for co wechat"
     # Keys captured: on by default, no prompt (context over control).
     home = tmp_path / "haskeys"
     (home / ".co" / "wechat").mkdir(parents=True)
     (home / ".co" / "wechat" / "keys.json").write_text("{}")
+    prepare(home / ".co" / "rem")
     monkeypatch.setattr(svc.Path, "home", staticmethod(lambda: home))
-    on = service.subscriptions(tmp_path / "rem")["wechat"]
+    on = service.subscriptions(home / ".co" / "rem")["wechat"]
     assert on["enabled"] is True and on["consented"] is True and on["chats"] == ["*"]
 
 
@@ -79,30 +81,54 @@ def test_a_stale_wechat_subscription_is_migrated_to_consented_when_keys_exist(tm
     # migrates it to enabled+consented so #3279's default-on holds on an upgrade, not only a fresh install.
     from connectonion.rem import service as svc
     from connectonion.rem.config import prepare
-    prepare(tmp_path / "rem")
     home = tmp_path / "haskeys"
     (home / ".co" / "wechat").mkdir(parents=True)
     (home / ".co" / "wechat" / "keys.json").write_text("{}")
+    prepare(home / ".co" / "rem")
     monkeypatch.setattr(svc.Path, "home", staticmethod(lambda: home))
     saved = {"wechat": {"id": "wechat", "kind": "wechat", "chats": ["*"], "enabled": True, "consented": False}}
-    svc.write_json(svc.state_path(tmp_path / "rem", "subscriptions.json"), saved)
-    sub = svc.subscriptions(tmp_path / "rem")["wechat"]
+    svc.write_json(svc.state_path(home / ".co" / "rem", "subscriptions.json"), saved)
+    sub = svc.subscriptions(home / ".co" / "rem")["wechat"]
     assert sub["enabled"] is True and sub["consented"] is True
+
+
+def test_keys_do_not_consent_wechat_outside_the_owners_notebook(tmp_path, monkeypatch):
+    """`~/.co/wechat/keys.json` consents the owner's notebook, not every root (#3375)."""
+    from connectonion.rem import service as svc
+    from connectonion.rem.config import prepare
+    home = tmp_path / "home"
+    (home / ".co" / "wechat").mkdir(parents=True)
+    (home / ".co" / "wechat" / "keys.json").write_text("{}")
+    monkeypatch.setattr(svc.Path, "home", staticmethod(lambda: home))
+    root = tmp_path / "fixture"
+    prepare(root)
+    saved = {"wechat": {"id": "wechat", "kind": "wechat", "chats": ["*"], "enabled": True, "consented": False}}
+    svc.write_json(svc.state_path(root, "subscriptions.json"), saved)
+    sub = svc.subscriptions(root)["wechat"]
+    assert sub["enabled"] is True and sub["consented"] is False   # the file's choice, not the keys
+    bare = svc.subscriptions(tmp_path / "plain")["wechat"]
+    assert bare["enabled"] is False and bare["consented"] is False
+    assert bare["adapter"] == "waiting for co wechat"
+    # A root marked as the owner's still takes the keys, wherever it lives.
+    marker = root / ".state" / "owner-notebook"
+    marker.write_text("")
+    marked = svc.subscriptions(root)["wechat"]
+    assert marked["enabled"] is True and marked["consented"] is True
 
 
 def test_an_unsubscribed_wechat_source_is_not_re_consented(tmp_path, monkeypatch):
     # `co rem sources remove wechat` sets unsubscribed; keys present must not silently turn it back on.
     from connectonion.rem import service as svc
     from connectonion.rem.config import prepare
-    prepare(tmp_path / "rem")
     home = tmp_path / "haskeys"
     (home / ".co" / "wechat").mkdir(parents=True)
     (home / ".co" / "wechat" / "keys.json").write_text("{}")
+    prepare(home / ".co" / "rem")
     monkeypatch.setattr(svc.Path, "home", staticmethod(lambda: home))
     saved = {"wechat": {"id": "wechat", "kind": "wechat", "chats": ["*"], "enabled": False,
                         "consented": False, "unsubscribed": True}}
-    svc.write_json(svc.state_path(tmp_path / "rem", "subscriptions.json"), saved)
-    sub = svc.subscriptions(tmp_path / "rem")["wechat"]
+    svc.write_json(svc.state_path(home / ".co" / "rem", "subscriptions.json"), saved)
+    sub = svc.subscriptions(home / ".co" / "rem")["wechat"]
     assert sub["consented"] is False and sub.get("unsubscribed") is True
 
 

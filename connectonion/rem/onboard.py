@@ -334,12 +334,30 @@ def _scope(sub: dict) -> str:
                       default=str)
 
 
+def _stored_consent(root: Path, name: str, sub: dict) -> bool:
+    """Consent a read may trust.
+
+    The owner's notebook uses ``sub``, which already applied the keys migration.
+    Every other notebook is read only when its own subscriptions file lists the
+    source as enabled and consented (#3375). A dict passed in from elsewhere is
+    not that file.
+    """
+    if not (sub.get("enabled") and sub.get("consented")):
+        return False
+    from .service import owner_notebook
+    if owner_notebook(root):
+        return True
+    saved = read_json(state_path(root, "subscriptions.json"), {})
+    row = saved.get(name) if isinstance(saved, dict) else None
+    return isinstance(row, dict) and bool(row.get("enabled") and row.get("consented"))
+
+
 def due(root: Path, subs: dict, *, night: bool) -> list[str]:
     """Sources to map now: never mapped, widened since, or (at night) the local ones that grow on their own."""
     done = read_json(state_path(root, STATE), {})
     names = []
     for name, sub in subs.items():
-        if not (sub.get("enabled") and sub.get("consented") and yields(sub)):
+        if not (_stored_consent(root, name, sub) and yields(sub)):
             continue
         if night and sub.get("kind") not in NIGHTLY:
             continue

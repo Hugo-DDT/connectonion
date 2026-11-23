@@ -51,6 +51,12 @@ def _engine(tmp_path, monkeypatch, said, rows=CONTACTS):
     monkeypatch.setattr(engine, "all_messages", lambda storage, known: said)
 
 
+def _store(root, subs=SUBS):
+    """Onboarding reads consent from the notebook's file, not from a passed dict (#3375)."""
+    from connectonion.rem.files import write_json
+    write_json(state_path(root, "subscriptions.json"), subs)
+
+
 def _said(*pairs):
     return [{"chat": chat_id, "chat_name": name, "sender": sender}
             for chat_id, name in pairs for sender in (chat_id, "wxid_owner")]
@@ -86,6 +92,7 @@ def _rows(chats=("wxid_quinn",)):
 
 
 def test_onboarding_ranks_chats_then_named_friends_then_the_rest_and_rests_pages_with_nothing_to_read(tmp_path, monkeypatch):
+    _store(tmp_path)
     monkeypatch.setattr("connectonion.rem.chat.wechat_people", lambda *a, **k: _rows())
     created = onboard.run_due(tmp_path, SUBS, night=True)
     assert len(created) == 3
@@ -104,6 +111,7 @@ def test_onboarding_ranks_chats_then_named_friends_then_the_rest_and_rests_pages
 
 
 def test_a_resting_friend_wakes_when_a_chat_arrives(tmp_path, monkeypatch):
+    _store(tmp_path)
     monkeypatch.setattr("connectonion.rem.chat.wechat_people", lambda *a, **k: _rows())
     onboard.run_due(tmp_path, SUBS, night=True)
     monkeypatch.setattr("connectonion.rem.chat.wechat_people", lambda *a, **k: _rows(chats=("wxid_quinn", "wxid_theo")))
@@ -114,6 +122,7 @@ def test_a_resting_friend_wakes_when_a_chat_arrives(tmp_path, monkeypatch):
 
 
 def test_the_address_book_maps_in_seconds_and_a_second_run_changes_nothing(tmp_path, monkeypatch):
+    _store(tmp_path)
     many = [{"address": f"wxid_friend{i:04d}", "name": f"Friend {i:04d}", "kind": "wechat", "friend": True,
              "remark": i % 3 == 0, "mails": 0, "sent": 0, "received": 0} for i in range(1700)]
     monkeypatch.setattr("connectonion.rem.chat.wechat_people", lambda *a, **k: many)
@@ -144,6 +153,7 @@ def test_a_wecom_friend_whose_id_has_an_at_sign_is_mapped_once(tmp_path, monkeyp
     rows = [{"address": "abc123def@openim", "name": "Wren", "kind": "wechat", "friend": True, "remark": False,
              "mails": 0, "sent": 0, "received": 0}]
     monkeypatch.setattr("connectonion.rem.chat.wechat_people", lambda *a, **k: rows)
+    _store(tmp_path)
     assert len(onboard.run_due(tmp_path, SUBS, night=True)) == 1
     assert onboard.plan(tmp_path, [{**rows[0], "kind": "person"}], ("people",), write=False)["people"]["create"] == []
 
@@ -248,6 +258,7 @@ def test_the_map_keeps_chat_activity_by_page_for_the_reader(tmp_path, monkeypatc
     rows = [{**row, "last": "2026-11-20T10:00:00+00:00" if row["address"] == "wxid_quinn" else "",
              "last_mine": False, "n90": 6 if row["address"] == "wxid_quinn" else 0} for row in _rows()]
     monkeypatch.setattr("connectonion.rem.chat.wechat_people", lambda *a, **k: rows)
+    _store(tmp_path)
     onboard.run_due(tmp_path, SUBS, night=True)
     found = onboard.activity(tmp_path)
     assert len(found) == 1   # only the friend with chats

@@ -9501,15 +9501,19 @@ function taskResult(entry) {
   const snapshotDone = !liveHere() && task.result === "completed";
   if (handed(task) && !snapshotDone) return null;
   const labels = {ready: "Awaiting approval", waiting: task.wait === "budget" ? "Queued: budget used up" : "Queued: later tonight", completed: "Completed"};
+  const summary = snapshotDone ? summaryHere(task.summary) : "";
   const result = el("section", {class: "task-result", "aria-label": t("Task result")}, [
     el("strong", {role: "status", text: t(labels[task.result || "ready"] || "Task")}),
-    task.reason ? el("p", {text: task.reason}) : null, snapshotDone && summaryHere(task.summary) ? el("p", {text: summaryHere(task.summary)}) : null]);
+    task.reason ? resultLine(task.reason, task) : null,
+    summary ? resultLine(summary, task) : null]);
   if (snapshotDone && task.reply) {
+    const words = plainDerived(task.reply), level = derivedLevel(task.reply, task);
     const reply = el("textarea", {readonly: "", "aria-label": t("Prepared reply")});
-    reply.value = task.reply;
+    reply.value = words;
     const copy = el("button", {type: "button", class: "btn-quiet", text: t("Copy prepared reply")});
-    copy.onclick = () => copyToClipboard(task.reply);
-    result.append(reply, copy);
+    copy.onclick = () => copyToClipboard(words);
+    // The reply and its copy button leave together: copying would put back what Public only took out.
+    result.append(el("div", level ? {class: "private", "data-level": level} : {}, [reply, copy]));
   }
   return result;
 }
@@ -10046,17 +10050,51 @@ function taskFailure(task) {
 function summaryHere(summary) {
   return summary && (uiLanguage !== "zh" || /[\u4e00-\u9fff]{2}/.test(summary)) ? summary : "";
 }
+// The item's own mark, or the same mark on the queue row the run was started from. A summary written later often
+// restates the item and drops the mark (#3436); the result still belongs to that item.
+function taskSourceLevel(task) {
+  const row = (typeof REM !== "undefined" ? REM.today_queue || [] : []).find(item =>
+    item.key === task?.key || item.keys?.includes(task?.key) || item.task?.id === task?.id || item.outcome?.task?.id === task?.id);
+  const source = [task?.text, task?.title, row?.text].filter(Boolean).join("\n");
+  return /[\[［]sensitive[\]］]/i.test(source) ? "sensitive" : /[\[［]personal[\]］]/i.test(source) ? "personal" : "";
+}
+function derivedLevel(text, task) {
+  const own = /[\[［]sensitive[\]］]/i.test(text || "") ? "sensitive" : /[\[［]personal[\]］]/i.test(text || "") ? "personal" : "";
+  const source = taskSourceLevel(task);
+  return own === "sensitive" || source === "sensitive" ? "sensitive" : own || source;
+}
+function plainDerived(text) {
+  return String(text || "").replace(/[ \t]*[\[［](?:personal|sensitive)[\]］]/gi, "").replace(/[ \t]{2,}/g, " ").trim();
+}
+// A result drawn as its own node, so applyPrivacy can curtain or remove it. The completion label stays outside it.
+// Unmarked words stay a plain string: a queued reason is the paragraph itself.
+function derivedNode(text, task) {
+  const words = plainDerived(text);
+  if (!words) return null;
+  const level = derivedLevel(text, task);
+  return level ? el("span", {class: "private", "data-level": level, text: words}) : words;
+}
+function resultLine(text, task) {
+  const words = derivedNode(text, task);
+  if (!words) return null;
+  return typeof words === "string" ? el("p", {text: words}) : el("p", {}, [words]);
+}
 function taskStatus(task) {
   const agent = AGENT_NAMES[task.agent || 'codex'];
   if (ACTIVE_TASK.includes(task.result)) return t('{agent} is working', { agent }) + ' · ' + taskElapsed(task.started_at || task.queued_at) + (taskStep(task) ? ' · ' + taskStep(task) : '');
-  // State in words first (owner: words for state), then what it found in one line.
-  return task.result === 'completed' ? t('{agent} finished', { agent }) + (summaryHere(task.summary) ? ' · ' + summaryHere(task.summary) : '') : taskFailure(task);
+  // State in words. What the run found is drawn beside this, at the item's privacy level (#3436).
+  return task.result === 'completed' ? t('{agent} finished', { agent }) : taskFailure(task);
 }
 function taskStatusNode(task) {
   if (ACTIVE_TASK.includes(task.result)) startTaskClock();
-  return el('span', { class: 'handed', role: 'status', text: taskStatus(task),
+  const attrs = { class: 'handed', role: 'status',
     ...(ACTIVE_TASK.includes(task.result) ? { 'data-task-start': task.started_at || task.queued_at || new Date(clockNow()).toISOString(),
-      'data-task-agent': task.agent || 'codex', 'data-task-step': taskStep(task) } : {}) });
+      'data-task-agent': task.agent || 'codex', 'data-task-step': taskStep(task) } : {}) };
+  const summaryText = task.result === 'completed' ? summaryHere(task.summary) : "";
+  const summary = summaryText ? derivedNode(summaryText, task) : null;
+  if (!summary) return el('span', { ...attrs, text: taskStatus(task) });
+  const summaryNode = typeof summary === "string" ? document.createTextNode(summary) : summary;
+  return el('span', attrs, [taskStatus(task) + ' · ', summaryNode]);
 }
 // The running rows' elapsed clocks tick once a second, started by the first running row drawn (not at load).
 function startTaskClock() {
@@ -10365,6 +10403,8 @@ function taskSource(id, trigger) {
 }
 function taskReport(text, task) {
   const box = agentText(taskReportLinks(text, task.id), task.record);
+  const level = derivedLevel(text, task || {});
+  if (level) { box.classList.add("private"); box.dataset.level = level; }
   wireTaskFiles(box);
   wireTaskSources(box);
   return box;

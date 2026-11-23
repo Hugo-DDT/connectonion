@@ -3522,7 +3522,9 @@ def test_take_back_puts_the_hand_buttons_back_on_the_row_in_place():
 
 def test_a_queued_task_card_says_why_it_waits():
     page = TEMPLATE.read_text()
-    functions = '\n'.join(re.search(r'function ' + name + r'\(.*?\n\}', page, re.S).group(0) for name in ['taskResult', 'todayRow', 'rowTask', 'handed'])
+    functions = '\n'.join(re.search(r'function ' + name + r'\(.*?\n\}', page, re.S).group(0)
+                          for name in ['taskResult', 'todayRow', 'rowTask', 'handed',
+                                       'taskSourceLevel', 'derivedLevel', 'plainDerived', 'derivedNode', 'resultLine'])
     result = _run_reader_js(functions + r'''
       const el = (tag, attrs = {}, children = []) => ({tag, ...attrs, children: children.filter(Boolean),
         appendChild(child) { this.children.push(child); }, append(...items) { this.children.push(...items); }});

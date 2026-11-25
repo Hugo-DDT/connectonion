@@ -279,3 +279,47 @@ def test_a_curtain_in_mid_sentence_stays_on_the_sentence_line(tmp_path, monkeypa
         page.locator("#main .curtain:not(.lifted)").first.click()   # still lifts on a click
         assert _legible(page, "landlord sells")
         browser.close()
+
+
+# Art director on #3417: at 只看公开 a section whose only lines are marked is not an empty heading.
+# A note under it ("这里有私人内容") would itself say the section has something. The footer's total is enough.
+# A section that still has a public line keeps its heading and that line.
+FAMILY = "Her sister is in hospital this month"
+FAMILY_ADDRESS = "The family address stays off this page"
+VENUE_PUBLIC = "The March booking is confirmed"
+VENUE_PRIVATE = "The venue holds two hundred"
+SECTION_PAGE = (
+    "# Wren Hale\n\n## Facts\n- Email: wren@example.test [1]\n\n"
+    "## Who they are\nWren runs the venue programme [1].\n\n"
+    "## Family notes\n- " + FAMILY + " [sensitive] [1].\n- " + FAMILY_ADDRESS + " [personal] [1].\n\n"
+    "## Venue notes\n- " + VENUE_PUBLIC + " [1].\n- " + VENUE_PRIVATE + " [personal] [1].\n\n"
+    "## Sources\n- [1] file:/notes/wren.md — 2026-09-30\n")
+
+
+def test_public_only_drops_a_private_only_section_and_keeps_a_mixed_one(tmp_path, monkeypatch):
+    from patchright.sync_api import sync_playwright
+    monkeypatch.setattr("connectonion.rem.service.mail_available", lambda kind: False)
+    root = tmp_path / "rem"
+    prepare(root)
+    Notebook(root).write("people/wren-hale.md", SECTION_PAGE)
+    path = write_reader(root)
+    with sync_playwright() as api:
+        browser, page = _open(api, path)
+        page.locator("#privacy-level").click()
+        page.get_by_role("menuitemradio", name="只看公开").click()
+        page.wait_for_function("privacyLevel === 'public'")
+        note = page.locator(".note")
+        html = note.evaluate("node => node.innerHTML", isolated_context=False)
+        children = note.evaluate("""node => [...node.children].map(n => ({
+          tag: n.tagName, anchor: n.dataset.anchor || "", text: n.textContent.trim().slice(0, 80)}))""",
+                                 isolated_context=False)
+        assert 'data-anchor="Family notes"' not in html, children
+        assert not [c for c in children if not c["text"]], children          # no empty list, paragraph, or wrapper
+        assert "sister is in" not in html and "family address" not in html   # absent, not hidden
+        assert any(c["anchor"] == "Venue notes" for c in children), children
+        assert any(VENUE_PUBLIC in c["text"] for c in children), children
+        assert "holds two hundred" not in html
+        main = page.locator("#main").inner_text()
+        assert "Family notes" not in main and "这里有私人内容" not in main
+        assert page.locator("#main .privacy-count").first.inner_text().endswith("处已隐藏")
+        browser.close()

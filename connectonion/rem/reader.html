@@ -6289,6 +6289,10 @@ function applyPrivacy(root) {
     line.dataset.n = total;
     line.textContent = t(total === 1 ? "1 passage hidden" : "{n} passages hidden", { n: total });
   }
+  // A section whose lines were all labelled is gone, heading included (#3417). An empty heading, or a
+  // line under it naming the private lines, would tell someone watching the screen that the section exists.
+  // The count on the place above is the only trace.
+  dropPrivateOnlySections(root);
 }
 // A passage taken out of a sentence leaves the text either side to read on: the space before the punctuation that
 // followed it goes, and an English sentence it opened starts with a capital ("classes. it will close", rc36).
@@ -6302,6 +6306,44 @@ function mendAfterRemoving(node) {
     before.nodeValue = before.nodeValue.trimEnd();
     after.nodeValue = after.nodeValue.trimStart();
   }
+}
+// True when this node still holds something a public reader should see. A passage left in the tree
+// (a raw excerpt, hidden by CSS) keeps its section; a notice that only says lines were hidden does not.
+function noteSectionHasWords(node) {
+  if (!(node instanceof Element)) return !!(node?.textContent || "").trim();
+  if (node.matches(".privacy-count, .private-history-notice, .private-hidden-notice, .heading-anchor")) return false;
+  if (node.matches(".private, li.private-item, .private-entry, .privacy-only, img, video, canvas, svg, table, pre, iframe")) return true;
+  for (const child of node.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) { if (child.textContent.trim()) return true; }
+    else if (noteSectionHasWords(child)) return true;
+  }
+  return false;
+}
+function dropPrivateOnlySections(root) {
+  const notes = new Set([...(root.matches?.(".note") ? [root] : []), ...root.querySelectorAll(".note")]);
+  const host = root.closest?.(".note");
+  if (host) notes.add(host);
+  for (const note of notes) {
+    const headings = [...note.querySelectorAll(":scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6")];
+    headings.sort((a, b) => b.tagName.charCodeAt(1) - a.tagName.charCodeAt(1));
+    for (const h of headings) {
+      if (!h.isConnected) continue;
+      const rank = Number(h.tagName[1]);
+      const body = [];
+      for (let n = h.nextElementSibling; n && !(/^H[1-6]$/.test(n.tagName) && Number(n.tagName[1]) <= rank); n = n.nextElementSibling) body.push(n);
+      if (body.some(noteSectionHasWords)) continue;
+      const id = h.id;
+      h.remove();
+      for (const n of body) n.remove();
+      if (!id) continue;
+      const mark = "h=" + encodeURIComponent(id);
+      for (const link of document.querySelectorAll(".toc a")) {
+        const href = link.getAttribute("href") || "";
+        if (href.endsWith(mark) || href.includes(mark + "&")) link.closest("li")?.remove();
+      }
+    }
+  }
+  for (const list of document.querySelectorAll(".toc")) if (!list.querySelector("li")) list.closest(".toc-panel")?.remove();
 }
 function liftCurtain(node) {
   node.classList.add("lifted");

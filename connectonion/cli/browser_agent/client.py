@@ -11,7 +11,9 @@ LLM-Note:
 
 import functools
 import inspect
+import json
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -515,7 +517,7 @@ def _caller_account() -> str:
 
 # Verbs that never launch Chrome: no point provisioning a browser for them.
 PAGELESS_VERBS = {
-    "status", "engine_status", "tab", "help", "use", "switch", "close", "closetab",
+    "status", "engine_status", "daemon_info", "tab", "help", "use", "switch", "close", "closetab",
 }
 # Verbs that read or act on a page that is already open and never open one
 # (only go_to, newtab and open_browser do). With no daemon running, each can
@@ -751,7 +753,7 @@ def _request_with_identity(
                 # only to close it answered "Browser closed. Session saved",
                 # which claimed a session nobody had opened.
                 return 0, "No browser is open — nothing to close."
-            if line.split()[:1] == ["status"]:
+            if line.split()[:1] in (["status"], ["daemon_info"]):
                 # Asking whether the browser is running must not start it. With
                 # nobody listening the answer is already known, and obtaining it
                 # by launching a Chrome — and creating ~/.co/browser.log to do
@@ -1184,6 +1186,291 @@ def _run_instruction(line: str, headless: bool, tab: str, engine_mode: str = "au
     return 0, "" if result is None else str(result)
 
 
+# The daemon reports the packages it imported. This client imported whatever
+# is installed now. The two disagree after an upgrade (#3366).
+_DAEMON_VERSION = re.compile(
+    r"Daemon: co (?P<co>\S+) / onionwright (?P<ow>\S+) · started (?P<started>\S+)"
+)
+
+
+def _installed_co_version() -> str:
+    from connectonion._version import __version__
+
+    return __version__
+
+
+def _installed_onionwright_version() -> str:
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+    except ImportError:  # pragma: no cover - stdlib on the versions we run
+        return "unknown"
+    try:
+        return version("onionwright")
+    except PackageNotFoundError:
+        return "not-installed"
+
+
+def _version_sentence(co: str, onionwright: str) -> str:
+    return (
+        f"this daemon runs co {co} / onionwright {onionwright}; "
+        f"installed is co {_installed_co_version()} / onionwright {_installed_onionwright_version()}"
+    )
+
+
+def _sentence_for(text: str) -> str:
+    match = _DAEMON_VERSION.search(text or "")
+    if not match:
+        return _version_sentence("unknown", "unknown")
+    return _version_sentence(match["co"], match["ow"])
+
+
+def _is_stale(status: str) -> bool:
+    match = _DAEMON_VERSION.search(status)
+    if not match:
+        return status.startswith("Browser:")
+    return (
+        match["co"] != _installed_co_version()
+        or match["ow"] != _installed_onionwright_version()
+    )
+
+
+def _browser_not_open(status: str) -> bool:
+    return status.startswith("Browser: not open")
+
+
+def _board_count(status: str) -> int | None:
+    for line in status.splitlines():
+        if line == "Tabs: none" or line.startswith("Tabs: none"):
+            return 0
+        match = re.match(r"Tabs \((\d+)\):", line)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _parse_board(payload: str):
+    try:
+        rows = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return None
+    return rows
+
+
+def _hold_message(status: str, count: int) -> str:
+    noun = "reservation" if count == 1 else "reservations"
+    return (
+        f"{_sentence_for(status)}\n"
+        f"{count} tab {noun} would end.\n"
+        "Run:\n"
+        "  co browser close"
+    )
+
+
+def _unreadable_message(status: str) -> str:
+    return (
+        f"{_sentence_for(status)}\n"
+        "The tab reservations could not be read, so this daemon was left running.\n"
+        "Run:\n"
+        "  co browser close"
+    )
+
+
+def _tab_open_line(row: dict) -> str:
+    tokens = ["tab", "open", str(row.get("tab") or "")]
+    if row.get("who"):
+        tokens += ["--who", str(row["who"])]
+    if row.get("purpose"):
+        tokens += ["--for", str(row["purpose"])]
+    try:
+        needs = int(row.get("needs_seconds") or 0)
+    except (TypeError, ValueError):
+        needs = 0
+    if needs > 0:
+        tokens += ["--needs", f"{needs}s"]
+    return shlex.join(tokens)
+
+
+def _probe_kwargs(headless: bool, engine_mode: str) -> dict:
+    kwargs = {"headless": headless}
+    if engine_mode != "auto":
+        kwargs["engine_mode"] = engine_mode
+    return kwargs
+
+
+def _stop_daemon(probe: dict):
+    """Stop the daemon. None when it is gone and the caller's command can continue."""
+    code, payload = _request("close", **probe)
+    if code:
+        return code, payload
+    return None
+
+
+def _restore_reservations(rows: list, probe: dict):
+    kept = [row for row in rows if str(row.get("tab") or "") not in ("", "main")]
+    for row in kept:
+        code, payload = _request(_tab_open_line(row), **probe)
+        if code:
+            return code, payload
+    return None
+
+
+def _restart_idle_daemon(status: str, line: str, probe: dict):
+    """Restart when no browser is open. A tuple is the final answer; None means continue."""
+    code, board = _request("tab ls --json", **probe)
+    rows = _parse_board(board) if code == 0 else None
+    if rows is None:
+        count = _board_count(status)
+        if count != 0:
+            message = _hold_message(status, count) if count is not None else _unreadable_message(status)
+            return 1, message
+        rows = []
+    if any(row.get("active_requests") for row in rows):
+        kept = [row for row in rows if str(row.get("tab") or "") not in ("", "main")]
+        if not kept:
+            return 1, (
+                f"{_sentence_for(status)}\n"
+                "A command is still recorded on this daemon, so it was left running.\n"
+                "Run:\n"
+                "  co browser close"
+            )
+        return 1, _hold_message(status, len(kept))
+    stopped = _stop_daemon(probe)
+    if stopped is not None:
+        return stopped
+    restored = _restore_reservations(rows, probe)
+    if restored is not None:
+        return restored
+    if shlex.split(line) == ["status"]:
+        return 0, _annotate_status(status)
+    return None
+
+
+def _annotate_status(status: str) -> str:
+    if "this daemon runs co " in status:
+        return status
+    return status.rstrip() + "\n" + _sentence_for(status)
+
+
+def _annotate_result(payload: str, status: str, code) -> str:
+    if not payload or "this daemon runs co " in payload:
+        return payload
+    engine_error = (
+        code == 6
+        or "pinned to engine" in payload
+        or payload.startswith("BrowserEngineError")
+    )
+    reported = _DAEMON_VERSION.search(payload) or _DAEMON_VERSION.search(status or "")
+    if not (payload.startswith("Browser:") or (engine_error and (reported or (status or "").startswith("Browser:")))):
+        return payload
+    source = payload if _DAEMON_VERSION.search(payload) else (status or "")
+    return payload.rstrip() + "\n" + _sentence_for(source)
+
+
+def _load_daemon_info(probe: dict):
+    """The running daemon's versions, or "legacy" when it predates the report."""
+    code, payload = _request("daemon_info", **probe)
+    text = "" if payload is None else str(payload)
+    if code == 0 and text.startswith("daemon-info "):
+        try:
+            info = json.loads(text[len("daemon-info "):])
+        except json.JSONDecodeError:
+            return None
+        return info if isinstance(info, dict) else None
+    if "unknown command" in text:
+        return "legacy"
+    return None
+
+
+def _report_line(info: dict) -> str:
+    return (
+        f"Daemon: co {info.get('co', 'unknown')} / onionwright "
+        f"{info.get('onionwright', 'unknown')} · started {info.get('started', 'unknown')}"
+    )
+
+
+def _info_is_stale(info: dict) -> bool:
+    return (
+        str(info.get("co")) != _installed_co_version()
+        or str(info.get("onionwright")) != _installed_onionwright_version()
+    )
+
+
+def _status_reply(probe: dict):
+    code, status = _request("status", **probe)
+    if code == 0 and str(status).startswith("Browser:"):
+        return 0, _annotate_status(status)
+    return code, status
+
+
+def _reconcile_legacy(line: str, probe: dict):
+    """A daemon that cannot report its version: read status, then maybe restart."""
+    code, status = _request("status", **probe)
+    if code != 0 or not str(status).startswith("Browser:"):
+        return None, ""
+    if not _is_stale(status) or not _browser_not_open(status):
+        if shlex.split(line) == ["status"]:
+            return (0, _annotate_status(status)), status
+        return None, status
+    return _restart_idle_daemon(status, line, probe), status
+
+
+def _reconcile_stale_daemon(line: str, *, headless: bool, engine_mode: str):
+    """(final answer or None, status text the decision was made from).
+
+    A supervised daemon (CO_BROWSER_DAEMON_PID) is someone else's process.
+    `close` is already the command that stops a daemon, so it is not restarted
+    out from under itself. The check is `daemon_info`, which does not ask
+    Chrome whether it is alive — `status` does, and that probe does not belong
+    in front of every command.
+    """
+    if os.environ.get("CO_BROWSER_DAEMON_PID") or shlex.split(line) == ["close"]:
+        return None, ""
+    if not _owner_alive(default_sock_path()):
+        return None, ""
+    probe = _probe_kwargs(headless, engine_mode)
+    info = _load_daemon_info(probe)
+    if info == "legacy":
+        return _reconcile_legacy(line, probe)
+    if not isinstance(info, dict):
+        return None, ""
+    report = _report_line(info)
+    if not _info_is_stale(info) or info.get("browser_open"):
+        if shlex.split(line) == ["status"]:
+            return _status_reply(probe), report
+        return None, report
+    rows = info.get("tabs")
+    if not isinstance(rows, list):
+        return _reconcile_legacy(line, probe)
+    return _restart_from_info(rows, line, probe, report), report
+
+
+def _restart_from_info(rows: list, line: str, probe: dict, report: str):
+    """Restart from a daemon_info tab list. A tuple is final; None means continue."""
+    if any(isinstance(row, dict) and row.get("active_requests") for row in rows):
+        kept = [
+            row for row in rows
+            if isinstance(row, dict) and str(row.get("tab") or "") not in ("", "main")
+        ]
+        if not kept:
+            return 1, (
+                f"{_sentence_for(report)}\n"
+                "A command is still recorded on this daemon, so it was left running.\n"
+                "Run:\n"
+                "  co browser close"
+            )
+        return 1, _hold_message(report, len(kept))
+    preview = _status_reply(probe) if shlex.split(line) == ["status"] else None
+    stopped = _stop_daemon(probe)
+    if stopped is not None:
+        return stopped
+    restored = _restore_reservations(rows, probe)
+    if restored is not None:
+        return restored
+    return preview
+
+
 def send(line: str, headless: bool = False, tab: str = None,
          _provisioned: bool = False, engine_mode: str = "auto") -> int:
     """Run a CLI command, print its result, and return its process exit code."""
@@ -1195,21 +1482,28 @@ def send(line: str, headless: bool = False, tab: str = None,
 
     if tokens[:1] == ["do"]:
         code, payload = 2, 'The do verb was removed. Run: co browser "<instruction>"'
-    elif len(tokens) == 1 and any(char.isspace() for char in tokens[0]):
-        code, payload = (
-            _run_instruction(line, headless, tab)
-            if engine_mode == "auto"
-            else _run_instruction(line, headless, tab, engine_mode)
-        )
     else:
-        request_kwargs = {
-            "headless": headless,
-            "tab": tab,
-            "_provisioned": _provisioned,
-        }
-        if engine_mode != "auto":
-            request_kwargs["engine_mode"] = engine_mode
-        code, payload = _request(line, **request_kwargs)
+        early, status = _reconcile_stale_daemon(
+            line, headless=headless, engine_mode=engine_mode
+        )
+        if early is not None:
+            code, payload = early
+        elif len(tokens) == 1 and any(char.isspace() for char in tokens[0]):
+            code, payload = (
+                _run_instruction(line, headless, tab)
+                if engine_mode == "auto"
+                else _run_instruction(line, headless, tab, engine_mode)
+            )
+        else:
+            request_kwargs = {
+                "headless": headless,
+                "tab": tab,
+                "_provisioned": _provisioned,
+            }
+            if engine_mode != "auto":
+                request_kwargs["engine_mode"] = engine_mode
+            code, payload = _request(line, **request_kwargs)
+            payload = _annotate_result(payload, status, code)
     if payload:
         print(payload, file=sys.stderr if code else sys.stdout)
     return code

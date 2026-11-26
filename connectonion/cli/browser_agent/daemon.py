@@ -28,7 +28,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from connectonion.useful_tools.browser_tools import BrowserAutomation
@@ -322,12 +322,42 @@ def _engine_label(mode: str) -> str:
     return "wtf" if mode == "onion" else mode
 
 
+def _co_version() -> str:
+    """The connectonion this process imported, not whatever is on disk now."""
+    from connectonion._version import __version__
+
+    return __version__
+
+
+def _onionwright_version() -> str:
+    """The onionwright this process would run, read once and then remembered."""
+    module = sys.modules.get("onionwright")
+    if module is not None:
+        version = getattr(module, "__version__", None)
+        if isinstance(version, str) and version:
+            return version
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+    except ImportError:  # pragma: no cover - importlib.metadata is stdlib on 3.11+
+        return "unknown"
+    try:
+        return version("onionwright")
+    except PackageNotFoundError:
+        return "not-installed"
+
+
+def _format_started(started) -> str:
+    if not isinstance(started, (int, float)):
+        return "unknown"
+    return datetime.fromtimestamp(started, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 # Verbs that neither drive nor create a page: which browser is running does not
 # change what they do, so the engine pin must not gate them. `close` above all —
 # it is the documented way out of a mismatched pin, and guarding it is what made
 # #1510 unrecoverable rather than merely annoying. `tab open` is deliberately NOT
 # here: it allocates a page, and on a paid pin that spends money.
-_ENGINE_AGNOSTIC_VERBS = ("close", "closetab", "status", "engine_status", "help")
+_ENGINE_AGNOSTIC_VERBS = ("close", "closetab", "status", "engine_status", "help", "daemon_info")
 _ENGINE_AGNOSTIC_TAB_SUBCOMMANDS = ("ls", "close")
 
 
@@ -492,6 +522,11 @@ class BrowserDaemon:
         self._had_browser = False
         self._defer_context_probe = False
         self.last_command = None  # {"line": str, "at": float} of the last real command
+        # Frozen at start. A later upgrade changes the packages on disk, not
+        # the modules this process already imported (#3366).
+        self.started_at = time.time()
+        self.co_version = _co_version()
+        self.onionwright_version = _onionwright_version()
         self._next_tab = 1        # id allocator for auto-named tabs
         self._registry_lock = asyncio.Lock()
         self._health_lock = asyncio.Lock()
@@ -535,7 +570,7 @@ class BrowserDaemon:
     # Verbs that neither drive nor destroy a page: never guarded, and a not-yet-registered
     # -t target is fine (you may inspect or create it). `help` never reaches the daemon —
     # the CLI answers it locally.
-    READONLY = ("tab", "status", "engine_status", "use", "switch")
+    READONLY = ("tab", "status", "engine_status", "daemon_info", "use", "switch")
 
     async def _engine_conflict(self, requested_engine: str) -> str | None:
         """The refusal text when this request cannot use the pinned engine, else None.
@@ -606,7 +641,7 @@ class BrowserDaemon:
         # no paid browser running, `--engine system` re-pins the daemon
         # (_fall_back_to_system), so it is offered before `close`, which ends
         # every session's tabs.
-        return (
+        return self._with_daemon_version(
             "browser daemon is pinned to engine=wtf and its paid session is no "
             "longer open. Starting it again bills, so a command with no engine "
             "of its own has to say:\n\n"
@@ -627,7 +662,7 @@ class BrowserDaemon:
         confidence of an instruction, which is how #1510 became unrecoverable.
         """
         pinned = _engine_label(self.engine_mode)
-        return (
+        return self._with_daemon_version(
             f"browser daemon is pinned to engine={pinned}; this request asked for "
             f"engine={_engine_label(requested_engine)}.\n\n"
             f"Run this command on the engine that is running:\n"
@@ -638,6 +673,42 @@ class BrowserDaemon:
             f"session's tabs:\n"
             f"  co browser close"
         )
+
+    def _daemon_info(self) -> str:
+        """One line the CLI can compare without touching Chrome."""
+        tabs = []
+        for key, meta in getattr(self.browser, "_tab_meta", {}).items():
+            tabs.append({
+                "tab": _tab_label(key),
+                "who": meta.get("who"),
+                "purpose": meta.get("purpose"),
+                "needs_seconds": int(_declared_hold(meta)),
+                "active_requests": [
+                    {"request_id": request_id, **request}
+                    for request_id, request in (meta.get("active_requests") or {}).items()
+                ],
+            })
+        body = {
+            "co": getattr(self, "co_version", None) or _co_version(),
+            "onionwright": getattr(self, "onionwright_version", None) or _onionwright_version(),
+            "started": _format_started(getattr(self, "started_at", None)),
+            "browser_open": getattr(self.browser, "browser", None) is not None,
+            "tabs": tabs,
+        }
+        return "daemon-info " + json.dumps(body, default=str)
+
+    def _version_report(self) -> str:
+        """co and onionwright as this process loaded them, and when it started."""
+        co = getattr(self, "co_version", None) or _co_version()
+        onionwright = getattr(self, "onionwright_version", None) or _onionwright_version()
+        started = _format_started(getattr(self, "started_at", None))
+        return f"Daemon: co {co} / onionwright {onionwright} · started {started}"
+
+    def _with_daemon_version(self, text: str) -> str:
+        report = self._version_report()
+        if report in text:
+            return text
+        return f"{text}\n{report}"
 
     def dispatch(self, raw: str) -> tuple:
         """Synchronous test/embedding bridge; production uses ``dispatch_async``.
@@ -819,6 +890,11 @@ class BrowserDaemon:
             return await self._tab_async(tokens[1:], caller)
         if verb == "status":  # read-only report; does not count as the last command
             return await self._status_async()
+        if verb == "daemon_info":
+            # Versions and whether a browser object exists. No liveness probe:
+            # status does that, and a probe before every command deadlocks a
+            # page that just timed out.
+            return True, self._daemon_info()
         if verb == "engine_status":  # protocol/diagnostic probe; no claim and no launch
             return await self._call_verb_async("engine_status", [])
         if verb in ("use", "switch"):  # removed: no server-side cursor, targeting is per-command
@@ -1021,7 +1097,10 @@ class BrowserDaemon:
                 # driver errors are rewritten above; _should_stop reads the
                 # "<verb> timed out" form.)
                 return False, f"{exc}{hint}"
-            return False, f"{type(exc).__name__}: {exc}{hint}"
+            text = f"{type(exc).__name__}: {exc}{hint}"
+            if isinstance(exc, browser_engine.BrowserEngineError):
+                text = self._with_daemon_version(text)
+            return False, text
 
         if staged_path is not None and staged_path.is_file():
             return True, artifact_stager.adopt(
@@ -1100,6 +1179,9 @@ class BrowserDaemon:
             open_state = "open" if alive else "not open"
         headless = str(getattr(self.browser, "_headless", False)).lower()
         lines = [f"Browser: {open_state} · headless={headless} · targeting is per-command (-t <tab>; bare = main)"]
+        # The CLI compares this with the packages it imported. They differ
+        # after an upgrade, because this process kept the old modules.
+        lines.append(self._version_report())
         engine_status = getattr(self.browser, "engine_status", None)
         try:
             engine = engine_status() if callable(engine_status) else {
@@ -1230,6 +1312,7 @@ class BrowserDaemon:
                                 field: m.get(field)
                                 for field in ("who", "purpose", "last_line", "last_at")
                             },
+                            "needs_seconds": int(_declared_hold(m)),
                             "active_requests": [
                                 {"request_id": request_id, **request}
                                 for request_id, request in m.get(
@@ -1977,6 +2060,11 @@ class BrowserDaemon:
 
     async def _should_stop(self, ok, payload: str) -> bool:
         """Serialize shared runtime health transitions after concurrent replies."""
+        # The CLI asks this before other commands. A liveness round trip here
+        # is the probe that deadlocks a timed-out page and that shuts a daemon
+        # down before its launch error can be reported.
+        if isinstance(payload, str) and payload.startswith("daemon-info "):
+            return False
         async with self._health_lock:
             if ok is False and re.match(r"^(TimeoutError:|\w+ timed out: )", payload):
                 self._had_browser = True

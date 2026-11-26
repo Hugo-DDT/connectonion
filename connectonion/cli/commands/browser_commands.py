@@ -29,7 +29,7 @@ USAGE = (
     "  co browser -t TAB cookies [set|clear|save|load] [--all] [--raw]   the tab's site cookies\n"
     "  co browser import [--domain SITE] [--dry-run]   carry Chrome's logins (cookies) into this browser\n"
     "  co browser history [--days N] [--json]     read local Chrome visits; no browser or network\n"
-    "  co browser status                        open or not, engine, last command, the tab board\n"
+    "  co browser status                        open or not, engine, daemon version, last command, the tab board\n"
     "  co browser close                         close the browser and stop the daemon\n"
     "  co browser install-onion                  install the onionwright driver (--engine wtf does this for you)\n"
     "  co browser help                          list every browser function\n"

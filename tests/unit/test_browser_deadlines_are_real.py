@@ -536,6 +536,204 @@ async def test_the_rival_tab_error_quotes_nothing_it_does_not_have():
     assert "no command yet" in payload
 
 
+def _ready_prepared():
+    from types import SimpleNamespace
+
+    from connectonion.useful_tools.browser_tools import engine
+
+    return SimpleNamespace(
+        ready=True,
+        executable="/runtimes/chrome",
+        capability=SimpleNamespace(
+            reason="ready",
+            next_action="start",
+            artifact=SimpleNamespace(artifact_id="chrome/154/linux-x86_64.tar.zst"),
+            interval_usd=0.025,
+            client_version=engine.MIN_ONIONWRIGHT_VERSION,
+        ),
+    )
+
+
+def _downloading_client(hold, started, *, sleep=0.0):
+    """Onionwright stand-in: the artifact is not cached, and prepare is the download."""
+    from types import SimpleNamespace
+
+    from connectonion.useful_tools.browser_tools import engine
+
+    prepared = _ready_prepared()
+
+    class Client:
+        client_version = engine.MIN_ONIONWRIGHT_VERSION
+
+        def capability(self, revision):
+            return SimpleNamespace(
+                reason="artifact_download_required",
+                cache_state="absent",
+                artifact=SimpleNamespace(size_bytes=186_400_000, artifact_id="chrome/154/linux"),
+            )
+
+        def prepare(self, revision, on_progress=None):
+            started.set()
+            if on_progress is not None:
+                on_progress(10, 100)
+            if sleep:
+                time.sleep(sleep)
+            else:
+                assert hold.wait(5), "the download was never released"
+            return prepared
+
+    return Client()
+
+
+def _core_that_resolves(client, tmp_path):
+    """A browser whose go_to prepares the WTF artifact on a thread, then navigates."""
+    from connectonion.useful_tools.browser_tools import engine
+
+    class Core(AsyncBrowserCore):
+        async def go_to(self, url, purpose="", who="", hours=0.0):
+            outcome = {}
+
+            def prepare():
+                outcome["resolution"] = engine.resolve(
+                    engine.ONION,
+                    token_loader=lambda: "token",
+                    client_factory=lambda token, home: client,
+                    home=tmp_path,
+                )
+
+            thread = threading.Thread(target=prepare)
+            thread.start()
+            try:
+                while thread.is_alive():
+                    await asyncio.sleep(0.01)
+            finally:
+                thread.join(timeout=5)
+            assert "resolution" in outcome
+            return f"Navigated to {url}"
+
+    return Core(headless=True)
+
+
+# ---- 11. the first WTF artifact download is not the page load ----------------
+
+
+@pytest.mark.asyncio
+async def test_a_slow_artifact_download_does_not_spend_the_go_to_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(daemon_module, "OPERATION_TIMEOUT", 0.25, raising=False)
+    started = threading.Event()
+    client = _downloading_client(threading.Event(), started, sleep=0.6)
+    server = BrowserDaemon("/tmp/unused.sock", headless=True)
+    server.browser = _core_that_resolves(client, tmp_path)
+
+    started_at = time.monotonic()
+    ok, payload = await asyncio.wait_for(
+        server.dispatch_async(envelope("go_to https://example.com")), 5
+    )
+
+    assert ok is True, payload
+    assert payload == "Navigated to https://example.com"
+    assert time.monotonic() - started_at >= 0.5
+    assert "page to load" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_while_the_artifact_downloads_names_the_download(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+    client = _downloading_client(release, started)
+    server = BrowserDaemon("/tmp/unused.sock", headless=True)
+    server.browser = _core_that_resolves(client, tmp_path)
+
+    task = asyncio.create_task(server.dispatch_async(envelope("go_to https://example.com")))
+    try:
+        for _ in range(200):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert started.is_set(), "prepare never started"
+        active = server.browser._tab_meta[None]["active_requests"]
+        request_id = next(iter(active))
+        ok, payload = await server._deadline_report(
+            envelope("go_to https://example.com"), request_id, 0.25
+        )
+        assert ok == 1
+        assert "download" in payload
+        assert "artifact" in payload
+        assert "page to load" not in payload
+    finally:
+        release.set()
+        await asyncio.wait_for(task, 5)
+
+
+@pytest.mark.asyncio
+async def test_go_to_still_times_out_on_the_page_once_the_browser_is_up(monkeypatch):
+    monkeypatch.setattr(daemon_module, "OPERATION_TIMEOUT", 0.25, raising=False)
+
+    class HungOnThePage(AsyncBrowserCore):
+        async def go_to(self, url, purpose="", who="", hours=0.0):
+            await asyncio.Event().wait()
+
+    server = BrowserDaemon("/tmp/unused.sock", headless=True)
+    server.browser = HungOnThePage(headless=True)
+    server.browser.browser = KeychainStalledContext()
+    server.browser._pages[None] = server.browser.browser.pages[0]
+
+    started = time.monotonic()
+    ok, payload = await asyncio.wait_for(
+        server.dispatch_async(envelope("go_to https://example.com")), 5
+    )
+
+    assert time.monotonic() - started < 2
+    assert ok == 1, payload
+    assert "did not finish within 0.25s" in payload
+    assert "the page to load" in payload
+    assert "artifact" not in payload
+
+
+def test_the_client_does_not_spend_its_reply_deadline_on_the_artifact_download(tmp_path, capsys):
+    """A download longer than the reply deadline still delivers the navigation."""
+    from connectonion.network.oip import browser_daemon_pb2 as wire
+
+    log = tmp_path / "browser.log"
+    log.write_text("older line\n", encoding="utf-8")
+    left, right = socket.socketpair()
+    frame = encode_frame(wire.Envelope(
+        protocol_version=2,
+        request_id="req",
+        result=wire.BrowserResult(text="Navigated to https://example.com/"),
+    ))
+
+    def serve():
+        time.sleep(0.15)
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(
+                "First run: downloading the WTF browser artifact "
+                "(one-time download, 10.0 MB)...\n"
+            )
+        time.sleep(0.5)
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(
+                "First run: downloading the WTF browser artifact "
+                "(one-time download, 10.0 MB)... done\n"
+            )
+        right.sendall(frame)
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        received = browser_client._recv_while_artifact_may_download(left, log, 0.3)
+    finally:
+        thread.join(timeout=2)
+        left.close()
+        right.close()
+
+    assert received.result.text == "Navigated to https://example.com/"
+    err = capsys.readouterr().err
+    assert "one-time download" in err
+    assert "10.0 MB" in err
+    assert "older line" not in err
+
+
 def test_a_closed_page_future_is_not_logged_as_never_retrieved():
     class TargetClosedError(Exception):
         pass

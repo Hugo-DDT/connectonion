@@ -6,7 +6,7 @@ LLM-Note:
   State/Effects: one asyncio-owned AsyncBrowserCore and persistent context | private mode starts its gateway, canonical credential file, and fixed paid launch policy before IPC bind; gateway loss rejects before browser mutation; shutdown closes browser, removes credentials, then stops gateway | independent tab tasks interleave behind per-tab locks | bounded POSIX/Windows transports and lifetime ownership sidecars preserve admission and cleanup
   Integration: launched detached via `python -m connectonion.cli.browser_agent.daemon <address> [--headless] [--engine=MODE] [--profile-dir=PATH] [--authkey-file=PATH] [--remote-egress]`; dispatch() remains the non-loop compatibility seam
   Performance: page operations on separate tabs overlap; same-tab work queues; browser/model/image blocking work never owns the event-loop thread; first browser launch remains 1-3s
-  Errors: malformed/oversized/stalled clients are bounded at their own connection boundary; every command is cancelled past OPERATION_TIMEOUT (or its own longer --timeout) and when its POSIX client disconnects; status/close/tab ls/tab close keep RESERVED_SLOTS past capacity; cancellation clears only its request lease; vanished readers are logged and cannot stop the daemon; launch failure or closed shared runtime releases the endpoint
+  Errors: malformed/oversized/stalled clients are bounded at their own connection boundary; every command is cancelled past OPERATION_TIMEOUT (or its own longer --timeout) — a one-time WTF artifact download does not count toward it, and a timeout that still lands during that download says so — and when its POSIX client disconnects; status/close/tab ls/tab close keep RESERVED_SLOTS past capacity; cancellation clears only its request lease; vanished readers are logged and cannot stop the daemon; launch failure or closed shared runtime releases the endpoint
 """
 
 import argparse
@@ -269,6 +269,11 @@ REPLY_TIMEOUT = 120.0
 # A command whose own --timeout is longer gets that plus OPERATION_MARGIN.
 OPERATION_TIMEOUT = 120.0
 OPERATION_MARGIN = 15.0
+# How often the deadline looks up to see that a WTF artifact download has
+# started. The download runs inside the command, on another thread, and the
+# 120s must not include it (#3183). A slice this short is the whole delay a
+# page-load timeout can pick up once the browser is already up.
+_DEADLINE_SLICE = 0.05
 # How long a cancelled command gets to unwind before its caller is answered
 # anyway. Cleanup can shield itself from cancellation; the answer cannot wait.
 CANCEL_GRACE = 5.0
@@ -680,14 +685,14 @@ class BrowserDaemon:
         operations[request_id] = work
         deadline = self._deadline_for(raw)
         try:
-            done, _ = await asyncio.wait({work}, timeout=deadline)
+            finished = await self._await_within_deadline(work, deadline)
         except asyncio.CancelledError:
             await self._abandon(work)
             raise
         finally:
             if operations.get(request_id) is work and work.done():
                 operations.pop(request_id, None)
-        if work in done:
+        if finished:
             if work.cancelled():  # a bare `close` stopped it
                 return 1, ("cancelled: the browser was closed while this command ran. "
                            "Next: run it again — the next command starts the browser")
@@ -698,6 +703,28 @@ class BrowserDaemon:
         await self._abandon(work)
         operations.pop(request_id, None)
         return report
+
+    async def _await_within_deadline(self, work: asyncio.Future, deadline: float) -> bool:
+        """True when `work` finished before `deadline` of time that was not a download.
+
+        The first `go_to` on a machine with no WTF artifact spends its time in
+        Onionwright's prepare(), fetching the browser. That wait is not the
+        page. Slices stay short so a download that starts after this wait does
+        not inherit the budget already handed to asyncio.
+        """
+        remaining = deadline
+        while True:
+            downloading = browser_engine.artifact_download_in_progress()
+            timeout = _DEADLINE_SLICE if downloading else min(_DEADLINE_SLICE, max(remaining, 0.0))
+            started = time.monotonic()
+            done, _ = await asyncio.wait({work}, timeout=timeout)
+            if work in done:
+                return True
+            if downloading or browser_engine.artifact_download_in_progress():
+                continue
+            remaining -= time.monotonic() - started
+            if remaining <= 0:
+                return False
 
     async def _abandon(self, work: asyncio.Future) -> None:
         """Cancel `work` and give it CANCEL_GRACE to unwind; never wait longer."""
@@ -756,7 +783,10 @@ class BrowserDaemon:
                 f"or open your own tab: co browser tab open <name>   ·   "
                 f"or start over: co browser close"
             )
-        what = _WAITS_ON.get(verb, "the browser, which did not answer")
+        if browser_engine.artifact_download_in_progress():
+            what = "the WTF browser artifact to download"
+        else:
+            what = _WAITS_ON.get(verb, "the browser, which did not answer")
         return 1, (
             f"{verb or 'the command'} did not finish within {deadline:g}s — it was "
             f"waiting on {what}.\n"

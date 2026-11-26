@@ -6,6 +6,8 @@ started (#2932): see refresh_applications_app.
 
 from __future__ import annotations
 
+import contextlib
+import inspect
 import os
 import plistlib
 import shutil
@@ -216,6 +218,159 @@ def _system(requested: str, reason: str, next_action: str) -> Resolution:
     )
 
 
+# How many WTF artifact downloads are in progress in this process. The browser
+# daemon reads it from another thread: prepare() runs off the event loop, and
+# the command deadline must not count that wait (#3183).
+_download_lock = threading.Lock()
+_downloads_in_progress = 0
+
+
+def artifact_download_in_progress() -> bool:
+    """True while an uncached WTF artifact is being prepared."""
+    with _download_lock:
+        return _downloads_in_progress > 0
+
+
+@contextlib.contextmanager
+def downloading_artifact():
+    """Mark the current thread's prepare() as the one-time artifact download."""
+    global _downloads_in_progress
+    with _download_lock:
+        _downloads_in_progress += 1
+    try:
+        yield
+    finally:
+        with _download_lock:
+            _downloads_in_progress -= 1
+
+
+def _format_download_size(size_bytes: int | None) -> str:
+    if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
+        return ""
+    if size_bytes >= 1_000_000:
+        return f", {size_bytes / 1_000_000:.1f} MB"
+    if size_bytes >= 1_000:
+        return f", {size_bytes / 1_000:.1f} KB"
+    return f", {size_bytes} B"
+
+
+def artifact_download_line(size_bytes: int | None) -> str:
+    """The same shape as the system engine's one-time download line, with a size."""
+    return (
+        "First run: downloading the WTF browser artifact "
+        f"(one-time download{_format_download_size(size_bytes)})..."
+    )
+
+
+def _artifact_size(capability) -> int | None:
+    size = getattr(getattr(capability, "artifact", None), "size_bytes", None)
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        return None
+    return size
+
+
+def _will_download_artifact(capability) -> bool:
+    """True when prepare() still has to fetch the archive.
+
+    Only Onionwright's own `artifact_download_required` means a fetch. A
+    manifest failure also reports cache_state `unknown`, and `verified` means
+    the archive is already on disk — neither one is the download.
+    """
+    if getattr(capability, "reason", None) != "artifact_download_required":
+        return False
+    return getattr(capability, "cache_state", None) not in {"ready", "verified"}
+
+
+def _download_status(client, browser_revision: str) -> tuple[bool, int | None]:
+    """(needs a download, size) from Onionwright's capability, without downloading.
+
+    A client with no capability() is left alone: older fakes and a prepare()
+    that will fail on its own must keep the call they have today.
+    """
+    capability = getattr(client, "capability", None)
+    if not callable(capability):
+        return False, None
+    try:
+        info = capability(browser_revision)
+    except Exception:
+        # Not being able to ask is not a download. prepare() reports the failure.
+        return False, None
+    if not _will_download_artifact(info):
+        return False, None
+    return True, _artifact_size(info)
+
+
+def _progress_parameter(prepare) -> str | None:
+    """The explicit progress argument, when prepare() has one.
+
+    Onionwright 0.0.16 is `prepare(revision, **host)` and forwards **host into
+    capability(), which rejects anything it does not declare. A catch-all is
+    not a progress hook.
+    """
+    try:
+        parameters = inspect.signature(prepare).parameters
+    except (TypeError, ValueError):
+        return None
+    for name in ("on_progress", "progress"):
+        param = parameters.get(name)
+        if param is not None and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return name
+    return None
+
+
+def _announce_download(size_bytes: int | None):
+    """Print the one-time line and return a callback for later progress events."""
+    line = artifact_download_line(size_bytes)
+    print(line, file=sys.stderr, flush=True)
+    last = -1
+
+    def report(received, total=None):
+        nonlocal last
+        if isinstance(received, str):
+            print(f"{line} {received}", file=sys.stderr, flush=True)
+            return
+        if (
+            isinstance(received, bool)
+            or not isinstance(received, int)
+            or isinstance(total, bool)
+            or not isinstance(total, int)
+            or total <= 0
+        ):
+            return
+        percent = min(100, received * 100 // total)
+        if percent == last:
+            return
+        last = percent
+        print(f"{line} {percent}%", file=sys.stderr, flush=True)
+
+    return report
+
+
+def _prepare_browser(client, browser_revision: str):
+    """prepare(), announcing and marking an uncached artifact download.
+
+    The mark is what lets the command deadline skip this wait. The trailing
+    `done` is what lets the client's own reply deadline resume afterwards.
+    """
+    needs_download, size_bytes = _download_status(client, browser_revision)
+    if not needs_download:
+        return client.prepare(browser_revision)
+    report = _announce_download(size_bytes)
+    kwargs = {}
+    progress_name = _progress_parameter(client.prepare)
+    if progress_name:
+        kwargs[progress_name] = report
+    with downloading_artifact():
+        prepared = client.prepare(browser_revision, **kwargs)
+    # The page-load clock starts again here. A failure above never says "done":
+    # the command's own error is the next thing on the socket.
+    print(f"{artifact_download_line(size_bytes)} done", file=sys.stderr, flush=True)
+    return prepared
+
+
 def _unavailable(requested: str, reason: str, next_action: str) -> Resolution:
     """Report a paid engine that could not be prepared.
 
@@ -314,7 +469,7 @@ def resolve(
         )
 
     try:
-        prepared = client.prepare(browser_revision)
+        prepared = _prepare_browser(client, browser_revision)
     except Exception as exc:
         reason = getattr(exc, "code", Reason.PREFLIGHT_FAILED)
         message = getattr(exc, "message", None) or (

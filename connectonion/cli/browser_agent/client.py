@@ -12,6 +12,7 @@ LLM-Note:
 import functools
 import inspect
 import os
+import select
 import shlex
 import socket
 import subprocess
@@ -604,6 +605,91 @@ def _oip_command(line: str, *, caller: str, account: str, tab, engine: str):
     )
 
 
+def _command_may_open_browser(line: str) -> bool:
+    """True for a command that can be the one which first launches the browser."""
+    try:
+        verb = shlex.split(line)[:1]
+    except ValueError:
+        return False
+    return bool(verb) and verb[0] not in PAGELESS_VERBS and verb[0] not in READ_VERBS
+
+
+def _browser_log_path(target) -> Path:
+    if target is not None and getattr(target, "log_path", None) is not None:
+        return Path(target.log_path)
+    return Path.home() / ".co" / "browser.log"
+
+
+class _ArtifactDownloadEcho:
+    """New daemon-log lines about the one-time WTF download, copied to stderr.
+
+    The daemon's own stderr is the log file. `paused` stays true from the
+    announcement until the matching `done` line, which is the stretch the
+    reply deadline must not charge.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.file = None
+        self.offset = 0
+        self.paused = False
+        self._open()
+
+    def _open(self) -> None:
+        try:
+            handle = open(self.path, "r", encoding="utf-8", errors="replace")
+        except OSError:
+            return  # not created yet; the next poll tries again
+        handle.seek(0, os.SEEK_END)
+        self.file = handle
+        self.offset = handle.tell()
+
+    def poll(self) -> None:
+        if self.file is None:
+            self._open()
+            if self.file is None:
+                return
+        self.file.seek(self.offset)
+        chunk = self.file.read()
+        self.offset = self.file.tell()
+        for line in chunk.splitlines():
+            if "one-time download" not in line:
+                continue
+            print(line, file=sys.stderr, flush=True)
+            self.paused = not line.rstrip().endswith(" done")
+
+    def close(self) -> None:
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+
+
+def _recv_while_artifact_may_download(conn, log_path: Path, deadline: float):
+    """One reply frame. An announced artifact download does not spend `deadline`.
+
+    select, not a short socket timeout: a timeout mid-frame would throw away
+    the bytes already read. Data that is already waiting is read at once.
+    """
+    echo = _ArtifactDownloadEcho(log_path)
+    remaining = deadline
+    try:
+        while True:
+            echo.poll()
+            slice_timeout = 0.05 if echo.paused else min(0.05, max(remaining, 0.0))
+            started = time.monotonic()
+            readable, _, _ = select.select([conn], [], [], slice_timeout)
+            if readable:
+                conn.settimeout(max(deadline, 0.1))
+                return recv_socket_frame(conn)
+            if echo.paused:
+                continue
+            remaining -= time.monotonic() - started
+            if remaining <= 0:
+                raise TimeoutError(f"no answer within {deadline:g}s")
+    finally:
+        echo.close()
+
+
 def _ensure_browser_ready(line: str) -> bool:
     """First-run auto-install: if this command will drive a page and no browser
     exists, install one NOW — the user just runs `co browser ...` and it works.
@@ -868,7 +954,19 @@ def _request_with_identity(
             conn.send_bytes(request)
         else:
             conn.sendall(request)
-        if (not transport.IS_WINDOWS and hasattr(conn, "settimeout")
+        if (
+            not transport.IS_WINDOWS
+            and isinstance(conn, socket.socket)
+            and effective_engine == "onion"
+            and _command_may_open_browser(line)
+            and not closing
+        ):
+            # The daemon writes the download line to its log. Echo it here,
+            # and do not charge that wait against the reply deadline (#3183).
+            first = _recv_while_artifact_may_download(
+                conn, _browser_log_path(target), reply_deadline,
+            )
+        elif (not transport.IS_WINDOWS and hasattr(conn, "settimeout")
                 and line.split()[:1] and line.split()[0] in READ_VERBS):
             first = _answer_while_alive(
                 receive_frame, conn, reply_deadline,

@@ -19,6 +19,61 @@ from pathlib import Path
 
 from .files import RemError
 
+# Lives in the notebook, not in the tool environment: an upgrade can remove the
+# package, and this script is what still runs. It never prints the import traceback.
+SCHEDULED_WRAPPER = """#!/bin/sh
+# A scheduled REM turn. If this install cannot import connectonion, say so and
+# try again in a few minutes. A missing co must not become a traceback (#3363).
+set -u
+msg="co 正在升级或缺失，本轮跳过，稍后重试"
+
+imports() {
+  exe=$1
+  [ -n "$exe" ] && [ -e "$exe" ] || return 1
+  py=$exe
+  name=${exe##*/}
+  if [ "$name" = "co" ]; then
+    sig=$(head -c 2 "$exe" 2>/dev/null || true)
+    if [ "$sig" != "#!" ]; then
+      "$exe" --version >/dev/null 2>&1
+      return $?
+    fi
+    py=$(sed -n '1s/^#![[:space:]]*//p' "$exe" | awk '{print $1}')
+  fi
+  [ -n "$py" ] && [ -x "$py" ] || return 1
+  "$py" -c "import connectonion" >/dev/null 2>&1
+}
+
+if ! imports "$1"; then
+  printf '%s\\n' "$msg"
+  sleep "${CO_SCHEDULE_RETRY_SECONDS:-180}"
+  if ! imports "$1"; then
+    printf '%s\\n' "$msg"
+    exit 0
+  fi
+fi
+exec "$@"
+"""
+
+
+def install_scheduled_wrapper(root: Path) -> Path:
+    """Write the skip-and-retry wrapper beside the notebook. Returns its path."""
+    path = Path(root) / ".state" / "rem-scheduled"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    current = path.read_text(encoding="utf-8") if path.is_file() else ""
+    if current != SCHEDULED_WRAPPER or (path.stat().st_mode & 0o777) != 0o700:
+        fd, name = tempfile.mkstemp(prefix=".rem-scheduled-", dir=path.parent)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(SCHEDULED_WRAPPER)
+        os.chmod(name, 0o700)
+        os.replace(name, path)
+    return path
+
+
+def scheduled_arguments(root: Path, command: list[str]) -> list[str]:
+    """The clock's command: the wrapper, then the real `co rem … --scheduled`."""
+    return ["/bin/sh", str(install_scheduled_wrapper(root)), *command]
+
 LABEL = "ai.openonion.co-rem"
 OLD_LABEL = "ai.openonion.co-wiki"  # jobs installed by `co wiki start`, 1.8.8-1.8.9 (#1932)
 TICK_SECONDS = 300  # a slot is served within five minutes of its time; a no-op tick is cheap
@@ -164,8 +219,8 @@ class Launchd:
             # caffeinate -i: no idle sleep while this process lives. A sleeping
             # laptop runs a slot only in its 45-second dark wakes, and every
             # monotonic deadline pauses with it (2026-10-10, one page, 80 min).
-            "ProgramArguments": ["/usr/bin/caffeinate", "-i", *command,
-                                 "rem", "--root", str(root), "sync", "--scheduled"],
+            "ProgramArguments": ["/usr/bin/caffeinate", "-i", *scheduled_arguments(
+                root, [*command, "rem", "--root", str(root), "sync", "--scheduled"])],
             "StartInterval": TICK_SECONDS,
             "StartCalendarInterval": [{"Minute": minute} for minute in range(0, 60, TICK_SECONDS // 60)],
             "RunAtLoad": False,
@@ -306,8 +361,8 @@ class CodexExec(Launchd):
             raise RemError('codex-exec fire times use this computer’s timezone; set schedule.timezone to the local timezone')
         root = Path(root).resolve()
         job = plistlib.loads(super().render(root, config).encode())
-        job['ProgramArguments'] = ['/usr/bin/caffeinate', '-i', sys.executable,
-                                   '-m', 'connectonion.rem.codex_exec', '--root', str(root)]
+        job['ProgramArguments'] = ['/usr/bin/caffeinate', '-i', *scheduled_arguments(
+            root, [sys.executable, '-m', 'connectonion.rem.codex_exec', '--root', str(root)])]
         job.pop('StartInterval')
         job['StartCalendarInterval'] = [dict(zip(('Hour', 'Minute'), map(int, t.split(':'))))
                                         for t in fire_times(config)]
@@ -386,7 +441,8 @@ class Systemd:
         from .runner import co_command
         root = Path(root).resolve()
         command = self.command or co_command()
-        arguments = [*command, "rem", "--root", str(root), "sync", "--scheduled"]
+        arguments = scheduled_arguments(
+            root, [*command, "rem", "--root", str(root), "sync", "--scheduled"])
         execute = " ".join(self._quote(arg.replace("$", "$$")) for arg in arguments)
         env = ["Environment=" + self._quote(f"{key}={value}")
                for key, value in self._environment(command).items()]

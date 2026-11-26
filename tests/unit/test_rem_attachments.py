@@ -128,7 +128,7 @@ def test_without_the_rem_extra_a_spreadsheet_says_how_to_install_it(tmp_path, mo
         prefix.mkdir(parents=True)
         (prefix / "uv-receipt.toml").write_text("[tool]\n")
     installer = ([str(executable), "-m", "pip", "install"] if environment == "plain venv"
-                 else ["uv", "tool", "install", "--force"])
+                 else [str(executable), "-m", "connectonion.tool_upgrade"])
     command = shlex.join([*installer, f"connectonion[rem]=={__version__}"])
     real_import = builtins.__import__
 
@@ -160,7 +160,7 @@ def test_spreadsheet_install_preserves_uv_companion_requirements(tmp_path, monke
 
     command = spreadsheet_install_command()
     assert command == (
-        f"uv tool install --force 'connectonion[rem]=={__version__}'"
+        f"{shlex.quote(sys.executable)} -m connectonion.tool_upgrade 'connectonion[rem]=={__version__}'"
         f" --with {shlex.quote('onionwright' + specifier)} --with other-package==2.0 --python 3.14"
     )
 

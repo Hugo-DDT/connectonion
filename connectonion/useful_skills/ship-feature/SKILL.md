@@ -168,6 +168,17 @@ internal links, AI-readable indexes, and mobile rendering. If the docs site
 cannot be published, report the release handoff as incomplete rather than
 silently skipping it.
 
+### 5f. Installing the release onto a machine that already runs `co`
+
+Release agents install the build they just published. Never
+`uv tool install --force` (that removes the old tool first; a failed install
+leaves no `co`, and a scheduled turn in that window crashes). Use `install.sh`,
+or `python -m connectonion.tool_upgrade 'connectonion[rem,whatsapp]==VERSION'`.
+The new environment is swapped in only after `~/.local/bin/co --version` succeeds.
+On failure the previous `co` keeps running; `co doctor` and `co rem status` name
+the reason. Roll back by leaving that previous shim in place — do not delete it
+to “clean up” a failed upgrade.
+
 ## Checklist
 
 - [ ] Tests updated and passing

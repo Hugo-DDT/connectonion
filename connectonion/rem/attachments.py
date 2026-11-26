@@ -25,7 +25,8 @@ def spreadsheet_install_command() -> str:
     prefix = Path(sys.prefix)
     receipt = prefix / "uv-receipt.toml"
     if prefix.parent.parts[-2:] == ("uv", "tools") or receipt.is_file():
-        command = f"uv tool install --force {package}"
+        # Atomic: `uv tool install --force` removes the running tool first (#3363).
+        command = f"{shlex.quote(sys.executable)} -m connectonion.tool_upgrade {package}"
         if receipt.is_file():
             tool = tomllib.loads(receipt.read_text(encoding="utf-8"))["tool"]
             for requirement in tool.get("requirements", []):

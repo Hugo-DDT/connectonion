@@ -857,6 +857,15 @@ def _unmatched_marks(root: Path) -> int:
     return unmatched_marks(root)
 
 
+def _upgrade_outcome() -> dict | None:
+    """The last tool upgrade when it failed or stopped halfway, else None (#3363)."""
+    from ..tool_upgrade import read_upgrade
+    data = read_upgrade()
+    if not data or data.get("outcome") == "ok":
+        return None
+    return data
+
+
 def status(root: Path, *, include_quota: bool = False, include_coverage: bool = True) -> dict:
     """The notebook's status; its whole-notebook scans (census, tags) run once in it (tags.held)."""
     from .tags import held
@@ -927,6 +936,7 @@ def _status(root: Path, *, include_quota: bool = False, include_coverage: bool =
                 "translation_coverage": translation_coverage(root, next_run=slot)} if include_coverage else {}),
             # An unfinished init archive (#2035): investigations ask the servers until it is done.
             **({"mail_archive": archive} if (archive := archive_state(root, now=now())) else {}),
+            **({"upgrade": upgrade} if (upgrade := _upgrade_outcome()) else {}),
             **(budget or {})}
 
 

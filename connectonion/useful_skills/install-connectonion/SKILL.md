@@ -78,6 +78,20 @@ co --version                          # confirm the CLI is on PATH
 >   or reinstall via `pipx install connectonion`.
 > - "externally-managed-environment" / permission error → go back to Step 1's venv, retry.
 
+### Upgrading a machine that already has `co`
+
+Do not run `uv tool install --force` (or `--reinstall`) against the live `co`.
+That flag deletes the current tool environment before the new one exists. If the
+new install fails, `co` is missing and a scheduled turn dies with
+`No module named 'connectonion'`.
+
+Upgrade through `install.sh`, or, once this version is installed, through
+`python -m connectonion.tool_upgrade SPEC`. Both install into a new environment
+and point `~/.local/bin/co` at it only after `co --version` runs (and a Python
+entry point can `import connectonion`). If that check fails, the old `co` is
+left in place. Check `~/.local/bin/co --version`. `co doctor` and `co rem status`
+then say the upgrade failed, with the reason.
+
 ## Step 3: Initialize global credentials; create a project only when requested
 
 Plain **`co init` initializes global `~/.co/keys.env` and the machine identity**,

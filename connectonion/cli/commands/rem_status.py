@@ -35,7 +35,8 @@ def card(root, value: dict, spell, *, verbose: bool = False, show_private: bool 
     found = pages(Path(root))
     counts = notebook(root, found)
     seen = (lambda text: text) if show_private else rem_look.glance
-    lines = [*_header(value, program()), "", *_paused(root, value, spell), *_waiting(root, found, value), *_today(root, value), "",
+    lines = [*_header(value, program()), "", *_upgrade(value), *_paused(root, value, spell),
+             *_waiting(root, found, value), *_today(root, value), "",
              *(highlight(part) for row in value.get('stages', []) for part in _clause_rows(row['text'])), "",
              *([highlight(seen(value['calendar']['text'])), ""] if value.get('calendar') else []),
              *([highlight(seen(value['day_plan']['text'])), ""] if value.get('day_plan') else []),
@@ -332,6 +333,15 @@ def _number(value) -> str:
 
 def _plural(number: int, word: str) -> str:
     return f"{_number(number)} {word}{'s' if number != 1 else ''}"
+
+
+def _upgrade(value: dict) -> list[str]:
+    """The last upgrade when it failed or stopped halfway. A working install says nothing."""
+    from ...tool_upgrade import outcome_line
+    text = outcome_line(value.get("upgrade"))
+    if not text:
+        return []
+    return [rem_look.section("Upgrade", style.warn(text)), ""]
 
 
 def _header(value: dict, program: str) -> list[str]:

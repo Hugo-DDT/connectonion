@@ -308,6 +308,15 @@ def handle_doctor(*, fix: bool = False, yes: bool = False, json_output: bool = F
             )
 
         report, code = runtime_json_report(fix=fix, approved=yes, run=quiet_run)
+        from ...tool_upgrade import outcome_line, read_upgrade
+        upgrade = outcome_line(read_upgrade())
+        if upgrade:
+            report["checks"].append({"id": "upgrade", "label": "Upgrade", "status": "blocked", "detail": upgrade})
+            report["summary"]["status"] = "blocked"
+            report["summary"]["exit_code"] = 1
+            if "upgrade" not in report["summary"]["blocked_check_ids"]:
+                report["summary"]["blocked_check_ids"].append("upgrade")
+            code = 1
         # stdout.write, not Rich: wrapping or styling would make the document
         # invalid JSON for the CI/support-bundle consumer this mode exists for.
         sys.stdout.write(json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n")
@@ -385,6 +394,12 @@ def handle_doctor(*, fix: bool = False, yes: bool = False, json_output: bool = F
     else:
         system_table.add_row("Command", "[red]✗[/red] 'co' not found in PATH")
         found.append("'co' is not on PATH")
+
+    from ...tool_upgrade import outcome_line, read_upgrade
+    upgrade = outcome_line(read_upgrade())
+    if upgrade:
+        system_table.add_row("Upgrade", f"[red]✗[/red] {upgrade}")
+        found.append(upgrade)
 
     # Package location
     import connectonion

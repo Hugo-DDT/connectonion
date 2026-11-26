@@ -43,8 +43,10 @@ def test_plist_runs_scheduled_daily_with_a_path_that_can_find_codex(tmp_path, mo
     config["schedule"]["timezone"] = "Australia/Sydney"
     plist = plistlib.loads(scheduler.render(root, config).encode())
     assert plist["Label"] == label_for(root)
-    assert plist["ProgramArguments"] == ["/usr/bin/caffeinate", "-i", "/venv/bin/co",
-                                         "rem", "--root", str(root), "sync", "--scheduled"]
+    args = plist["ProgramArguments"]
+    assert args[:2] == ["/usr/bin/caffeinate", "-i"]
+    assert args[2:4] == ["/bin/sh", str(root / ".state" / "rem-scheduled")]
+    assert args[4:] == ["/venv/bin/co", "rem", "--root", str(root), "sync", "--scheduled"]
     assert "/opt/codex/bin" in plist["EnvironmentVariables"]["PATH"]
     assert "/venv/bin" in plist["EnvironmentVariables"]["PATH"]
     assert plist["StandardErrorPath"].startswith(str(root / ".state"))
@@ -191,8 +193,11 @@ def test_the_job_runs_the_installation_that_installed_it_not_the_first_co_on_pat
     scheduler = Launchd(agents_dir=tmp_path / "LaunchAgents", uid=501, run=Calls())
     root = tmp_path / "rem"
     plist = plistlib.loads(scheduler.render(root, default_config()).encode())
-    assert plist["ProgramArguments"] == ["/usr/bin/caffeinate", "-i", "/work/venv/bin/python", "-m",
-                                         "connectonion.cli.main", "rem", "--root", str(root), "sync", "--scheduled"]
+    args = plist["ProgramArguments"]
+    assert args[:2] == ["/usr/bin/caffeinate", "-i"]
+    assert args[2:4] == ["/bin/sh", str(root / ".state" / "rem-scheduled")]
+    assert args[4:] == ["/work/venv/bin/python", "-m", "connectonion.cli.main",
+                        "rem", "--root", str(root), "sync", "--scheduled"]
     assert plist["EnvironmentVariables"]["PATH"].startswith("/work/venv/bin:")
 
 
@@ -248,7 +253,8 @@ def test_systemd_render_runs_the_saved_installation_every_tick(tmp_path, monkeyp
     monkeypatch.setattr("connectonion.rem.schedule._checkout_path", lambda: "/work/checkout")
     units = scheduler.render(root, default_config())
     service, timer = units["service"], units["timer"]
-    assert f'ExecStart="/venv/bin/co" "rem" "--root" "{root}" "sync" "--scheduled"' in service
+    assert '"/bin/sh"' in service and "rem-scheduled" in service
+    assert f'"/venv/bin/co" "rem" "--root" "{root}" "sync" "--scheduled"' in service
     assert "Type=oneshot" in service
     assert 'Environment="PATH=/venv/bin:/opt/codex/bin:/opt/claude/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"' in service
     assert f'Environment="HOME={Path.home()}"' in service
@@ -265,7 +271,8 @@ def test_systemd_defaults_to_co_command_and_omits_installed_package_pythonpath(t
     monkeypatch.setattr("connectonion.rem.runner.co_command", lambda: ["/venv/bin/python", "-m", "connectonion.cli.main"])
     monkeypatch.setattr("connectonion.rem.schedule._checkout_path", lambda: "")
     service = scheduler.render(tmp_path, default_config())["service"]
-    assert 'ExecStart="/venv/bin/python" "-m" "connectonion.cli.main" "rem"' in service
+    assert '"/bin/sh"' in service and "rem-scheduled" in service
+    assert '"/venv/bin/python" "-m" "connectonion.cli.main" "rem"' in service
     assert "PYTHONPATH" not in service
 
 

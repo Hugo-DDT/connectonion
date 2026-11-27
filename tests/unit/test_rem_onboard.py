@@ -143,9 +143,16 @@ def _patch_wechat(monkeypatch):
     monkeypatch.setattr("connectonion.rem.chat.wechat_people", lambda *a, **k: [{**r, "kind": "wechat"} for r in CONTACTS])
 
 
+def _store(root, subs):
+    """The notebook's own file is what onboarding is allowed to read (#3375)."""
+    from connectonion.rem.files import state_path, write_json
+    write_json(state_path(root, "subscriptions.json"), subs)
+
+
 def test_the_night_onboards_a_new_chat_source_and_its_pages_go_first(tmp_path, monkeypatch):
     from connectonion.rem import people_pages
     _notebook(tmp_path)
+    _store(tmp_path, SUBS)
     _patch_wechat(monkeypatch)
     created = onboard.run_due(tmp_path, SUBS, night=True)
     assert len(created) == 2
@@ -156,6 +163,7 @@ def test_the_night_onboards_a_new_chat_source_and_its_pages_go_first(tmp_path, m
 
 def test_a_second_night_makes_nothing_new(tmp_path, monkeypatch):
     _notebook(tmp_path)
+    _store(tmp_path, SUBS)
     _patch_wechat(monkeypatch)
     onboard.run_due(tmp_path, SUBS, night=True)
     asked = (tmp_path / ".state" / "people" / "onboarded.json").read_text()
@@ -163,9 +171,22 @@ def test_a_second_night_makes_nothing_new(tmp_path, monkeypatch):
     assert (tmp_path / ".state" / "people" / "onboarded.json").read_text() == asked
 
 
+def test_onboarding_a_foreign_notebook_ignores_consent_that_is_not_in_its_file(tmp_path):
+    """A passed-in dict is not consent. The notebook's own file is (#3375)."""
+    assert onboard.due(tmp_path, SUBS, night=True) == []
+    assert onboard.run_due(tmp_path, SUBS, night=True) == []
+
+
+def test_a_notebook_marked_as_the_owners_keeps_in_memory_wechat_consent(tmp_path):
+    (tmp_path / ".state").mkdir()
+    (tmp_path / ".state" / "owner-notebook").write_text("")
+    assert onboard.due(tmp_path, SUBS, night=True) == ["wechat"]
+
+
 def test_the_night_maps_only_local_sources_and_sources_add_maps_any(tmp_path):
     subs = {**SUBS, "gmail": {"kind": "gmail", "enabled": True, "consented": True},
             "codex": {"kind": "codex", "enabled": True, "consented": True}}
+    _store(tmp_path, subs)
     assert onboard.due(tmp_path, subs, night=True) == ["wechat"]
     assert sorted(onboard.due(tmp_path, subs, night=False)) == ["codex", "gmail", "wechat"]
 
@@ -174,6 +195,7 @@ def test_a_widened_source_is_due_again(tmp_path):
     from connectonion.rem.files import state_path, write_json
     gmail = {"kind": "gmail", "enabled": True, "consented": True, "since": "60d"}
     write_json(state_path(tmp_path, onboard.STATE), {"gmail": {"mapped_at": "2026-11-01", "scope": onboard._scope(gmail)}})
+    _store(tmp_path, {"gmail": gmail})
     assert onboard.due(tmp_path, {"gmail": gmail}, night=False) == []
     assert onboard.due(tmp_path, {"gmail": {**gmail, "since": "1y"}}, night=False) == ["gmail"]
 
@@ -182,6 +204,7 @@ def test_a_page_leaves_the_front_once_investigated_after_onboarding(tmp_path, mo
     from connectonion.rem import people_pages
     from connectonion.rem.files import state_path, write_json
     _notebook(tmp_path)
+    _store(tmp_path, SUBS)
     _patch_wechat(monkeypatch)
     onboard.run_due(tmp_path, SUBS, night=True)
     write_json(state_path(tmp_path, "people/investigated.json"), {MAIL_PERSON: "2099-01-01T00:00:00+00:00"})
@@ -194,5 +217,6 @@ def test_an_unreadable_source_is_recorded_not_fatal(tmp_path, monkeypatch):
     def broken(*a, **k):
         raise RemError("WeChat keys are not readable")
     monkeypatch.setattr("connectonion.rem.chat.wechat_people", broken)
+    _store(tmp_path, SUBS)
     assert onboard.run_due(tmp_path, SUBS, night=True) == []
     assert "not readable" in onboard.summary(tmp_path, "wechat")["error"]

@@ -82,12 +82,33 @@ MAX_LOOKBACK_DAYS = {"codex": 180, "claude-code": 180, "gmail": 730, "outlook": 
 READABLE = (*KINDS, *MAIL_KINDS, *CHAT_KINDS)
 
 
+def owner_notebook(root: Path) -> bool:
+    """Whether WeChat keys in HOME may consent this notebook (#3375).
+
+    That is the default ``~/.co/rem``, or a root marked with an
+    ``.state/owner-notebook`` file. Any other notebook is consented for WeChat
+    only by the subscription it stored itself.
+    """
+    try:
+        if Path(root).expanduser().resolve() == (Path.home() / ".co" / "rem").resolve():
+            return True
+    except OSError:
+        return False
+    state = Path(root) / ".state"
+    if not state.is_dir() or state.is_symlink():
+        return False
+    marker = state / "owner-notebook"
+    return marker.is_file() and not marker.is_symlink()
+
+
 def subscriptions(root: Path) -> dict:
     saved = read_json(state_path(root, "subscriptions.json"), {})
     if not isinstance(saved, dict):
         raise RemError("Invalid subscriptions file; preserve it for diagnosis")
     since = (now() - timedelta(days=DEFAULT_LOOKBACK_DAYS)).isoformat()
-    _wechat_ready = (Path.home() / ".co" / "wechat" / "keys.json").is_file()
+    # Keys on this Mac consent the owner's notebook only. They are not a property
+    # of a fixture rendered somewhere else (#3375).
+    _wechat_ready = owner_notebook(root) and (Path.home() / ".co" / "wechat" / "keys.json").is_file()
     defaults = {
         "codex": {"id": "codex", "kind": "codex", "root": str(codex_sessions_root()),
                   "project": None, "since": since, "max_lookback_days": MAX_LOOKBACK_DAYS["codex"],
@@ -118,10 +139,11 @@ def subscriptions(root: Path) -> dict:
                    "adapter": "available" if _wechat_ready else "waiting for co wechat"},
     }
     defaults.update(saved)
-    # Capturing WeChat's keys IS the local, reversible consent (#3279): keys present means the source is
-    # enabled and consented, even for a subscription stored before #3281 with consented:False, so it is one
-    # source of truth and a page we seed is a page we fill (#3289). An explicit `co rem sources remove wechat`
-    # (unsubscribed) is respected and stays off.
+    # Capturing WeChat's keys IS the local, reversible consent (#3279) for the owner's notebook: keys
+    # present means that notebook's source is enabled and consented, even for a subscription stored before
+    # #3281 with consented:False, so it is one source of truth and a page we seed is a page we fill (#3289).
+    # An explicit `co rem sources remove wechat` (unsubscribed) is respected and stays off. A notebook at any
+    # other root does not inherit this (#3375).
     wechat = defaults.get("wechat")
     if _wechat_ready and wechat and not wechat.get("unsubscribed"):
         wechat["enabled"] = True

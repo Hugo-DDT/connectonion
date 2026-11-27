@@ -231,3 +231,46 @@ def test_changing_what_the_backfill_writes_needs_a_version_bump():
 
 
 PINNED_SOURCE = "460551c4b62f4af8"
+
+
+def test_a_rendered_fixture_does_not_inherit_home_wechat(tmp_path, monkeypatch):
+    """A notebook that is not the owner's must not read HOME's WeChat (#3375).
+
+    `~/.co/wechat/keys.json` is a fact about the Mac. A fixture rendered at a temp
+    root, with that file present, used to be treated as consented and the page
+    build's backfill copied real last-message previews into the fixture.
+    """
+    from pathlib import Path
+
+    import connectonion.rem.reader as reader
+    import connectonion.rem.service as rem_service
+    from connectonion.rem.files import Notebook
+    from connectonion.rem.reader import snapshot
+
+    # reader.py binds subscriptions at import. A test in this file imports it while
+    # service.subscriptions is patched, and that binding would outlive the patch.
+    reader.subscriptions = rem_service.subscriptions
+
+    home = Path.home()
+    (home / ".co" / "wechat").mkdir(parents=True)
+    (home / ".co" / "wechat" / "keys.json").write_text("{}")
+    root = tmp_path / "fixture"
+    Notebook(root).stub_person("people/mara.md", "Mara Ostrowski", ["wxid_mara"])
+    secret = "see you at the real harbour"
+    calls = []
+
+    def chats(*args, **kwargs):
+        calls.append(1)
+        return [{"address": "wxid_mara", "name": "Mara Ostrowski", "mails": 2, "sent": 1, "received": 1,
+                 "friend": True, "remark": True, "last": "2026-11-22T09:00:00+00:00", "last_mine": False,
+                 "n90": 2, "first": "2024-03-05T09:00:00+00:00", "preview": secret}]
+
+    monkeypatch.setattr("connectonion.rem.chat.wechat_people", chats)
+    data = snapshot(root, local=True)
+    activity = read_json(state_path(root, onboard.ACTIVITY), {})
+    assert calls == []
+    assert activity == {}
+    assert data["chat_activity"] == {}
+    assert secret not in str(data["subscriptions"])
+    wechat = data["subscriptions"].get("wechat")
+    assert not wechat or not wechat.get("consented")
